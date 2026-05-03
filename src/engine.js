@@ -6,12 +6,14 @@ export const OPERATIONS = {
   division:       { key: "division",       symbol: "÷", label: "Division" },
 };
 
-// Per-operation latency thresholds (ms). Add/sub are inherently faster than mul/div.
+// Per-operation latency thresholds (ms).
+// Tuned from real session data — earlier values were too aggressive, almost
+// nothing classified as "fast" so no facts were reaching automatic.
 export const THRESHOLDS = {
-  addition:       { fast: 800,  slow: 1800 },
-  subtraction:    { fast: 900,  slow: 2000 },
-  multiplication: { fast: 1200, slow: 2500 },
-  division:       { fast: 1500, slow: 3000 },
+  addition:       { fast: 1100, slow: 2200 },
+  subtraction:    { fast: 1100, slow: 2200 },
+  multiplication: { fast: 1500, slow: 2800 },
+  division:       { fast: 1800, slow: 3200 },
 };
 
 // Cold-start: small starter pool per op. Expansion handles the rest.
@@ -22,10 +24,10 @@ export const STARTER_LEVELS = {
   division:       5, // b,q in 2..5 → 16 facts
 };
 
-export const SESSION_GOAL_XP   = 5;        // 5 XP = ~5 min of focused effort
+export const SESSION_GOAL_XP   = 2;        // ~2 min focused work closes the in-session ring
 export const SESSION_TIME_CAP  = 10 * 60;  // 10 min hard stop (seconds)
 export const PROBLEM_TIME_CAP  = 8;        // sec max counted per problem (anti-idle)
-export const DAILY_GOAL_XP     = 5;
+export const DAILY_GOAL_XP     = 5;        // ~5 min total focused work per day across sessions
 export const ACCURACY_GATE     = 0.85;
 export const MIN_ATTEMPTS_FOR_FLUENCY = 4;
 export const MAX_LEVEL         = 12;

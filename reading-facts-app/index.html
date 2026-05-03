@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reading Facts</title>
+    <style>
+      /* ---------- Page ---------- */
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #f5f5f7;
+        color: #1d1d1f;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        padding: 24px;
+        transition: background 300ms ease;
+      }
+
+      /* Warm gradient background — only on the dashboard screen. */
+      body.warm-bg {
+        background: linear-gradient(180deg, #fff7ed 0%, #ffeed8 100%);
+      }
+
+      /* ---------- Card ---------- */
+      .card {
+        background: #ffffff;
+        border-radius: 20px;
+        padding: 48px 40px;
+        width: 100%;
+        max-width: 520px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+        text-align: center;
+      }
+
+      .progress {
+        font-size: 14px;
+        color: #6e6e73;
+        margin-bottom: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+      }
+
+      /* "Level 2" pill shown next to the progress text. */
+      .level-pill {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: #1d1d1f;
+        background: #ffe8b3;
+        padding: 3px 8px;
+        border-radius: 999px;
+      }
+
+      .category-tag {
+        display: inline-block;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: #6e6e73;
+        background: #f5f5f7;
+        padding: 4px 10px;
+        border-radius: 999px;
+        margin-bottom: 16px;
+      }
+
+      .prompt {
+        font-size: 96px;
+        font-weight: 600;
+        margin: 0 0 16px 0;
+        letter-spacing: -2px;
+        line-height: 1.1;
+      }
+
+      /* Extra-large prompt for picture-word atoms (single emoji). The
+         default 96px is fine for letters, but emoji feel a little
+         small at that size — bump them up for visual impact. */
+      .prompt:has(> .picture),
+      .prompt.prompt-picture {
+        font-size: 144px;
+      }
+
+      /* Smaller prompt for instruction-style text (PA atoms, blending
+         questions). The default 96px is for single letters / short
+         words; longer text needs a readable size and looser tracking. */
+      .prompt.prompt-small {
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        line-height: 1.3;
+        margin: 8px 0 16px;
+      }
+
+      /* Instruction line — sits under the prompt for speaking questions
+         (e.g. "Read this word out loud"). */
+      .instruction {
+        font-size: 15px;
+        color: #6e6e73;
+        margin: -8px 0 16px;
+      }
+
+      /* ============================================================
+         SPEAKING QUESTIONS — microphone button + "heard" feedback
+         ============================================================ */
+      .speak-area {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        margin-top: 8px;
+      }
+
+      .mic-btn {
+        font: inherit;
+        font-size: 17px;
+        font-weight: 600;
+        color: #ffffff;
+        background: #007aff;
+        border: none;
+        border-radius: 999px;
+        padding: 18px 28px;
+        cursor: pointer;
+        box-shadow: 0 4px 12px rgba(0, 122, 255, 0.25);
+        transition: background 0.15s, transform 80ms ease, box-shadow 0.2s;
+      }
+
+      .mic-btn:hover:not(:disabled) {
+        background: #0062cc;
+      }
+
+      .mic-btn:active:not(:disabled) {
+        transform: scale(0.97);
+      }
+
+      .mic-btn:disabled {
+        cursor: default;
+        opacity: 0.85;
+      }
+
+      /* Pulsing ring while we're listening to the microphone. */
+      .mic-btn.mic-listening {
+        background: #ff3b30;
+        box-shadow: 0 4px 12px rgba(255, 59, 48, 0.25);
+        animation: mic-pulse 1.2s ease-in-out infinite;
+      }
+
+      @keyframes mic-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.45); }
+        50%      { box-shadow: 0 0 0 14px rgba(255, 59, 48, 0); }
+      }
+
+      /* Text under the mic showing what the recognizer heard. */
+      .heard {
+        font-size: 14px;
+        color: #6e6e73;
+        min-height: 20px;
+      }
+
+      /* Speaker button — sits between the prompt and the choices. */
+      .sound-btn {
+        font: inherit;
+        font-size: 14px;
+        font-weight: 500;
+        color: #6e6e73;
+        background: #f5f5f7;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        padding: 8px 16px;
+        margin: 0 0 24px 0;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+      }
+
+      .sound-btn:hover {
+        background: #ececef;
+        color: #1d1d1f;
+        border-color: rgba(0, 0, 0, 0.08);
+      }
+
+      .sound-btn:active {
+        transform: scale(0.97);
+      }
+
+      /* ---------- Choice buttons ---------- */
+      .choices {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .choice {
+        font: inherit;
+        font-size: 18px;
+        padding: 18px 20px;
+        border: 1px solid #d2d2d7;
+        background: #ffffff;
+        color: #1d1d1f;
+        border-radius: 12px;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+      }
+
+      .choice:hover:not(:disabled) {
+        background: #f5f5f7;
+        border-color: #b8b8be;
+      }
+
+      .choice:disabled {
+        cursor: default;
+        opacity: 0.7;
+      }
+
+      .choice.correct {
+        background: #e6f6ec;
+        border-color: #34c759;
+        color: #1d1d1f;
+        opacity: 1;
+      }
+
+      .choice.wrong {
+        background: #fdecea;
+        border-color: #ff3b30;
+        color: #1d1d1f;
+        opacity: 1;
+      }
+
+      /* ---------- Feedback ---------- */
+      .feedback {
+        margin-top: 28px;
+        font-size: 18px;
+        min-height: 24px;
+      }
+
+      .feedback.good {
+        color: #248a3d;
+      }
+
+      .feedback.bad {
+        color: #c5301f;
+      }
+
+      /* ---------- Buttons (matched to math facts) ---------- */
+      .primary-btn,
+      .secondary-btn {
+        font: inherit;
+        font-size: 15px;
+        font-weight: 600;
+        padding: 14px 20px;
+        border-radius: 12px;
+        border: none;
+        cursor: pointer;
+        transition: background 150ms ease, transform 80ms ease;
+      }
+
+      .primary-btn {
+        background: #1d1d1f;
+        color: #ffffff;
+      }
+
+      .primary-btn:hover {
+        background: #2d2d2f;
+      }
+
+      .primary-btn:active {
+        transform: scale(0.985);
+      }
+
+      .secondary-btn {
+        background: rgba(255, 255, 255, 0.7);
+        color: #1d1d1f;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+      }
+
+      .secondary-btn:hover {
+        background: rgba(255, 255, 255, 0.95);
+      }
+
+      .secondary-btn:active {
+        transform: scale(0.985);
+      }
+
+      /* The single "Next" button after answering: full-width, with top spacing. */
+      .next-btn {
+        width: 100%;
+        margin-top: 24px;
+      }
+
+      /* ============================================================
+         DASHBOARD — matched to math facts summary screen
+         ============================================================ */
+      .warm-greeting {
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        color: #1d1d1f;
+        margin-bottom: 8px;
+      }
+
+      /* Wrapper around the SVG rings, with the score number absolutely
+         centered over the rings. */
+      .rings-wrap {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin: 4px 0;
+      }
+
+      .rings-center {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+        pointer-events: none;
+      }
+
+      .rings-xp {
+        font-size: 36px;
+        font-weight: 600;
+        letter-spacing: -0.03em;
+        color: #1d1d1f;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+      }
+
+      .rings-label {
+        font-size: 12px;
+        color: #86868b;
+        margin-top: 4px;
+        letter-spacing: 0.02em;
+      }
+
+      /* Small legend under the rings. */
+      .rings-legend {
+        display: flex;
+        justify-content: center;
+        gap: 18px;
+        margin: 10px 0 4px;
+        font-size: 12px;
+        color: #86868b;
+        font-weight: 500;
+      }
+
+      .legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        display: inline-block;
+      }
+
+      .summary-line {
+        margin-top: 16px;
+        font-size: 14px;
+        color: #86868b;
+        font-weight: 500;
+      }
+
+      .stat-grid {
+        margin-top: 24px;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        padding: 24px 0;
+        border-top: 1px solid rgba(0, 0, 0, 0.06);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+      }
+
+      .stat-num {
+        font-size: 22px;
+        font-weight: 600;
+        color: #1d1d1f;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: -0.02em;
+      }
+
+      .stat-label {
+        font-size: 12px;
+        color: #86868b;
+        margin-top: 4px;
+      }
+
+      .summary-actions {
+        margin-top: 24px;
+        display: flex;
+        gap: 10px;
+      }
+
+      .summary-actions .primary-btn,
+      .summary-actions .secondary-btn {
+        flex: 1;
+      }
+
+      /* ============================================================
+         HOME SCREEN — strand picker + today's plan
+         Mirrors the math-facts home layout so the two apps look
+         consistent. Eyebrow + plan-line + 2x2 strand grid.
+         ============================================================ */
+      .eyebrow {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: #86868b;
+        text-align: center;
+        margin: 8px 0 4px;
+      }
+
+      .plan-line {
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        color: #1d1d1f;
+        text-align: center;
+        margin: 4px 0 8px;
+      }
+
+      .streak-line {
+        font-size: 13px;
+        font-weight: 500;
+        color: #6e6e73;
+        text-align: center;
+        margin-bottom: 24px;
+      }
+
+      .strand-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      .strand-card {
+        font-family: inherit;
+        background: #f5f5f7;
+        border: 1px solid transparent;
+        border-radius: 16px;
+        padding: 20px 16px;
+        cursor: pointer;
+        text-align: left;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        transition: background 0.15s, border-color 0.15s, transform 80ms;
+      }
+
+      .strand-card:hover {
+        background: #ececef;
+        border-color: rgba(0, 0, 0, 0.08);
+      }
+
+      .strand-card:active {
+        transform: scale(0.98);
+      }
+
+      /* The recommended strand gets the dark "primary" treatment so it
+         stands out on the home screen. Mirrors math facts. */
+      .strand-card-recommended {
+        background: #1d1d1f;
+        color: #ffffff;
+      }
+
+      .strand-card-recommended:hover {
+        background: #2d2d2f;
+      }
+
+      .strand-card-recommended .strand-meta,
+      .strand-card-recommended .strand-submeta {
+        color: rgba(255, 255, 255, 0.7);
+      }
+
+      .strand-card-recommended .strand-progress-track {
+        background: rgba(255, 255, 255, 0.18);
+      }
+
+      .strand-card-recommended .strand-progress-fill {
+        background: #ffffff;
+      }
+
+      .strand-symbol {
+        font-size: 32px;
+        font-weight: 700;
+        line-height: 1;
+        margin-bottom: 4px;
+        letter-spacing: -0.02em;
+      }
+
+      .strand-label {
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .strand-meta {
+        font-size: 13px;
+        color: #6e6e73;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .strand-submeta {
+        font-size: 11px;
+        color: #86868b;
+      }
+
+      .strand-progress-track {
+        width: 100%;
+        height: 4px;
+        background: rgba(0, 0, 0, 0.08);
+        border-radius: 999px;
+        margin-top: 8px;
+        overflow: hidden;
+      }
+
+      .strand-progress-fill {
+        height: 100%;
+        background: #1d1d1f;
+        border-radius: 999px;
+        transition: width 0.4s ease;
+      }
+
+      /* Tighter rings on home (smaller card section). */
+      .rings-wrap.home-rings {
+        margin: 8px 0 4px;
+      }
+
+      /* ============================================================
+         STRAND DETAIL — header + atom list with mastery bars
+         ============================================================ */
+      .strand-detail-header {
+        text-align: center;
+        margin-bottom: 16px;
+      }
+
+      .strand-detail-symbol {
+        display: block;
+        font-size: 48px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        margin-bottom: 8px;
+      }
+
+      .strand-detail-title {
+        font-size: 28px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        margin: 0 0 4px;
+      }
+
+      .strand-detail-sub {
+        font-size: 14px;
+        color: #6e6e73;
+        margin: 0;
+      }
+
+      .strand-detail-actions {
+        margin: 16px 0 24px;
+      }
+
+      .strand-detail-actions .primary-btn {
+        width: 100%;
+      }
+
+      .atom-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .atom-row {
+        display: grid;
+        grid-template-columns: 80px 1fr 44px;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 12px;
+        background: #f5f5f7;
+        border-radius: 10px;
+        font-size: 14px;
+      }
+
+      .atom-row-mastered {
+        background: #ecf7ed;
+      }
+
+      .atom-prompt {
+        font-weight: 600;
+        color: #1d1d1f;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .atom-bar-track {
+        height: 6px;
+        background: rgba(0, 0, 0, 0.08);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .atom-bar-fill {
+        height: 100%;
+        background: #1d1d1f;
+        border-radius: 999px;
+        transition: width 0.4s ease;
+      }
+
+      .atom-row-mastered .atom-bar-fill {
+        background: #34c759;
+      }
+
+      .atom-score {
+        text-align: right;
+        font-size: 12px;
+        color: #6e6e73;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ============================================================
+         TOP BAR — back button (left) + student name + ⋯ menu (right)
+         Sits above the question and dashboard content.
+         ============================================================ */
+      .top-bar {
+        display: grid;
+        grid-template-columns: 32px 1fr 32px;
+        align-items: center;
+        margin: -16px -8px 24px;
+      }
+
+      .top-bar > .top-bar-name {
+        text-align: center;
+      }
+
+      .back-btn {
+        font: inherit;
+        font-size: 22px;
+        line-height: 1;
+        background: transparent;
+        border: none;
+        color: #6e6e73;
+        cursor: pointer;
+        padding: 4px 8px;
+        border-radius: 8px;
+        justify-self: start;
+      }
+
+      .back-btn:hover {
+        background: #f5f5f7;
+        color: #1d1d1f;
+      }
+
+      .back-btn-spacer {
+        display: block;
+        width: 32px;
+      }
+
+      .top-bar-name {
+        font-size: 14px;
+        font-weight: 600;
+        color: #1d1d1f;
+      }
+
+      .menu-wrap {
+        position: relative;
+      }
+
+      .menu-btn {
+        font: inherit;
+        font-size: 22px;
+        line-height: 1;
+        background: transparent;
+        border: none;
+        color: #6e6e73;
+        cursor: pointer;
+        padding: 4px 10px;
+        border-radius: 8px;
+      }
+
+      .menu-btn:hover {
+        background: #f5f5f7;
+        color: #1d1d1f;
+      }
+
+      .menu-dropdown {
+        position: absolute;
+        right: 0;
+        top: calc(100% + 6px);
+        background: #ffffff;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 12px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+        min-width: 160px;
+        overflow: hidden;
+        z-index: 10;
+      }
+
+      .menu-item {
+        font: inherit;
+        font-size: 14px;
+        text-align: left;
+        width: 100%;
+        background: transparent;
+        border: none;
+        padding: 10px 14px;
+        cursor: pointer;
+        color: #1d1d1f;
+      }
+
+      .menu-item:hover {
+        background: #f5f5f7;
+      }
+
+      /* ============================================================
+         AUTH + STUDENT PICKER SCREENS
+         ============================================================ */
+      .brand-mark {
+        display: inline-block;
+        font-weight: 700;
+        font-size: 14px;
+        letter-spacing: 0.1em;
+        color: #ffffff;
+        background: #1d1d1f;
+        padding: 6px 12px;
+        border-radius: 8px;
+        margin-bottom: 24px;
+      }
+
+      .auth-title {
+        font-size: 28px;
+        font-weight: 600;
+        margin: 0 0 8px 0;
+        letter-spacing: -0.02em;
+      }
+
+      .auth-subtitle {
+        font-size: 15px;
+        color: #6e6e73;
+        margin: 0 0 24px 0;
+        line-height: 1.4;
+      }
+
+      .auth-input {
+        font: inherit;
+        font-size: 16px;
+        width: 100%;
+        padding: 14px 16px;
+        border: 1px solid #d2d2d7;
+        border-radius: 12px;
+        margin-bottom: 12px;
+        background: #ffffff;
+        color: #1d1d1f;
+      }
+
+      .auth-input:focus {
+        outline: none;
+        border-color: #1d1d1f;
+      }
+
+      .auth-submit {
+        width: 100%;
+        margin-top: 4px;
+      }
+
+      .auth-restart {
+        margin-top: 16px;
+      }
+
+      .auth-error {
+        margin-top: 12px;
+        font-size: 14px;
+        color: #c5301f;
+        min-height: 20px;
+      }
+
+      .auth-loading {
+        font-size: 16px;
+        color: #6e6e73;
+        padding: 24px 0;
+      }
+
+      /* Tabs at the top of the login screen — Sign in / Create account / Email link. */
+      .auth-tabs {
+        display: flex;
+        gap: 4px;
+        background: #f5f5f7;
+        border-radius: 10px;
+        padding: 4px;
+        margin-bottom: 20px;
+      }
+
+      .auth-tab {
+        font: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        color: #6e6e73;
+        background: transparent;
+        border: none;
+        padding: 8px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        flex: 1;
+        transition: background 0.15s, color 0.15s;
+      }
+
+      .auth-tab:hover {
+        color: #1d1d1f;
+      }
+
+      .auth-tab.active {
+        background: #ffffff;
+        color: #1d1d1f;
+        font-weight: 600;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+      }
+
+      /* Small text-style button used to toggle between sign-in and sign-up
+         inside the Student tab. */
+      .link-btn {
+        font: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        color: #007aff;
+        background: transparent;
+        border: none;
+        padding: 8px 0 0;
+        cursor: pointer;
+        text-decoration: none;
+        display: block;
+        margin: 4px auto 0;
+      }
+
+      .link-btn:hover {
+        color: #0062cc;
+        text-decoration: underline;
+      }
+
+
+      .auth-divider {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 13px;
+        color: #86868b;
+        margin: 20px 0 12px;
+      }
+
+      .auth-divider::before,
+      .auth-divider::after {
+        content: "";
+        flex: 1;
+        height: 1px;
+        background: rgba(0, 0, 0, 0.08);
+      }
+
+      .student-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+
+      .student-card {
+        font: inherit;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: #f5f5f7;
+        border: 1px solid transparent;
+        border-radius: 14px;
+        padding: 18px 20px;
+        cursor: pointer;
+        text-align: left;
+        transition: background 0.15s, border-color 0.15s;
+      }
+
+      .student-card:hover {
+        background: #ececef;
+        border-color: rgba(0, 0, 0, 0.08);
+      }
+
+      .student-name {
+        font-size: 17px;
+        font-weight: 600;
+        color: #1d1d1f;
+      }
+
+      .student-grade {
+        font-size: 13px;
+        color: #6e6e73;
+      }
+
+      .picker-signout {
+        margin-top: 8px;
+        width: 100%;
+      }
+
+      /* Used by the file:// instructions screen and error fallback. */
+      .code-block {
+        background: #1d1d1f;
+        color: #f5f5f7;
+        padding: 14px 16px;
+        border-radius: 10px;
+        text-align: left;
+        font-size: 13px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        overflow-x: auto;
+        margin: 16px 0;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card" id="app">
+      <!-- App content is rendered here by app.js -->
+    </main>
+
+    <!-- Friendly fallback when the file is opened via file:// (e.g. by
+         double-clicking index.html). Browsers block ES module imports
+         from file:// for security reasons, so the main app can't run.
+         We show a clear "run a local server" message instead of leaving
+         a blank white card. -->
+    <script>
+      (function () {
+        if (window.location.protocol !== "file:") return;
+
+        function show() {
+          var app = document.getElementById("app");
+          if (!app) return;
+          app.innerHTML =
+            '<div class="brand-mark">VPA</div>' +
+            '<h1 class="auth-title">Open this through a local server</h1>' +
+            '<p class="auth-subtitle">Sign-in uses Supabase, which browsers only allow over <strong>http://</strong> — not <strong>file://</strong>. Open Terminal and run:</p>' +
+            '<div class="code-block">cd /Users/samuelbennett/math-facts-trainer-react/reading-facts-app\npython3 -m http.server 8000</div>' +
+            '<p class="auth-subtitle">Then open <strong>http://localhost:8000</strong> in your browser.</p>';
+        }
+
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", show);
+        } else {
+          show();
+        }
+      })();
+    </script>
+
+    <!-- The app is an ES module — it imports questions.js, supabase.js,
+         auth.js, and students.js itself. Only runs over http(s). -->
+    <script type="module" src="src/app.js"></script>
+  </body>
+</html>

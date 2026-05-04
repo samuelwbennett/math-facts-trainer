@@ -46,10 +46,14 @@ const SCHEDULE_KEYS = [
   "thuGoal", "friGoal", "satGoal",
 ];
 
-// Math Academy's daily-task screen for logged-in students. This is
-// the canonical "do today's work" entry point. If MA changes their
-// URL scheme, this is the only string to edit.
-const MA_DAILY_TASK_PATH = "/learn";
+// Path appended to https://www.mathacademy.com for the launch
+// button. We've left this at "/" — the homepage redirects logged-in
+// students to their daily-task screen, which always works.
+//
+// If you discover the canonical deep-link route (e.g.
+// /students/<id> or /sessions/today), swap the value here. The
+// snapshot endpoint will pick it up on next deploy.
+const MA_DAILY_TASK_PATH = "/";
 
 // Build the nextDrill object that the dashboard uses for the launch
 // button label. Three cases, in priority order:

@@ -1,5 +1,14 @@
 import { createClient } from "@supabase/supabase-js";
 
+function todayInDenver() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Denver",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -18,11 +27,11 @@ export default async function handler(req, res) {
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayInDenver();
 
     const { data, error } = await supabase
       .from("daily_progress")
-      .select("total_xp, per_app")
+      .select("total_xp, per_app, day")
       .eq("student_id", studentId)
       .eq("day", today)
       .maybeSingle();
@@ -36,6 +45,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       studentId,
+      date: today,
       todayXp,
       weekXp: todayXp,
       dailyGoalXp: 5,

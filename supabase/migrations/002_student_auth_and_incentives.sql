@@ -32,18 +32,23 @@ create unique index if not exists students_auth_user_id_uidx
   where auth_user_id is not null;
 
 -- A student can read/update their own row when signed in.
-create policy if not exists "students_select_self"
+-- Postgres doesn't support `create policy if not exists`, so we
+-- drop-then-create to keep the migration idempotent.
+drop policy if exists "students_select_self" on public.students;
+create policy "students_select_self"
   on public.students for select
   to authenticated using (auth_user_id = auth.uid());
 
-create policy if not exists "students_update_self"
+drop policy if exists "students_update_self" on public.students;
+create policy "students_update_self"
   on public.students for update
   to authenticated using (auth_user_id = auth.uid());
 
 -- A student can read their own app accounts, sessions, daily progress.
 -- (We keep the existing guardian-of-student policies in place; these
 -- add a self-access path for student-owned auth.)
-create policy if not exists "student_app_accounts_self"
+drop policy if exists "student_app_accounts_self" on public.student_app_accounts;
+create policy "student_app_accounts_self"
   on public.student_app_accounts for select
   to authenticated using (
     student_id in (
@@ -51,7 +56,8 @@ create policy if not exists "student_app_accounts_self"
     )
   );
 
-create policy if not exists "practice_sessions_self"
+drop policy if exists "practice_sessions_self" on public.practice_sessions;
+create policy "practice_sessions_self"
   on public.practice_sessions for select
   to authenticated using (
     student_id in (
@@ -59,7 +65,8 @@ create policy if not exists "practice_sessions_self"
     )
   );
 
-create policy if not exists "daily_progress_self"
+drop policy if exists "daily_progress_self" on public.daily_progress;
+create policy "daily_progress_self"
   on public.daily_progress for select
   to authenticated using (
     student_id in (
@@ -90,7 +97,8 @@ create index if not exists incentive_redemptions_student_idx
 alter table public.incentive_redemptions enable row level security;
 
 -- Students can read their own redemption history.
-create policy if not exists "incentive_redemptions_self_read"
+drop policy if exists "incentive_redemptions_self_read" on public.incentive_redemptions;
+create policy "incentive_redemptions_self_read"
   on public.incentive_redemptions for select
   to authenticated using (
     student_id in (

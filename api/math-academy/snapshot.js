@@ -46,14 +46,19 @@ const SCHEDULE_KEYS = [
   "thuGoal", "friGoal", "satGoal",
 ];
 
-// Path appended to https://www.mathacademy.com for the launch
-// button. We've left this at "/" — the homepage redirects logged-in
-// students to their daily-task screen, which always works.
+// Math Academy student-facing daily-task URL pattern. The numeric
+// student id (returned as student.id from the partner API) is the
+// stable identifier — username can change, the integer can't.
 //
-// If you discover the canonical deep-link route (e.g.
-// /students/<id> or /sessions/today), swap the value here. The
-// snapshot endpoint will pick it up on next deploy.
-const MA_DAILY_TASK_PATH = "/";
+//   https://www.mathacademy.com/students/<numericId>/activity
+//
+// `dailyTaskPath(numericId)` builds the path portion that's appended
+// to the deepLinkBaseUrl ("https://www.mathacademy.com") in the
+// orchestration adapter.
+function dailyTaskPath(numericId) {
+  if (numericId == null) return "/";
+  return `/students/${encodeURIComponent(numericId)}/activity`;
+}
 
 // Build the nextDrill object that the dashboard uses for the launch
 // button label. Three cases, in priority order:
@@ -61,29 +66,26 @@ const MA_DAILY_TASK_PATH = "/";
 //   2. Goal hit (todayXp >= goal && goal > 0) → bonus-practice copy.
 //   3. Has a current course → "<Course> — N% complete".
 //   4. Fallback → generic "Continue Math Academy".
-// All variants deep-link to /learn so the click actually starts work.
-function buildNextDrill({ course, dailyGoalXp, todayXp }) {
+// All variants deep-link to /students/<numericId>/activity so the
+// click lands on this student's MA activity page.
+function buildNextDrill({ course, dailyGoalXp, todayXp, maNumericId }) {
+  const path = dailyTaskPath(maNumericId);
   if (dailyGoalXp === 0) {
-    return {
-      label: "Rest day — bonus practice?",
-      path: MA_DAILY_TASK_PATH,
-    };
+    return { label: "Rest day — bonus practice?", path };
   }
   if (todayXp >= dailyGoalXp && dailyGoalXp > 0) {
     return {
-      label: course
-        ? `${course.name} — goal complete`
-        : "Daily goal complete",
-      path: MA_DAILY_TASK_PATH,
+      label: course ? `${course.name} — goal complete` : "Daily goal complete",
+      path,
     };
   }
   if (course) {
     return {
       label: `${course.name} — ${Math.round((course.progress ?? 0) * 100)}% complete`,
-      path: MA_DAILY_TASK_PATH,
+      path,
     };
   }
-  return { label: "Continue Math Academy", path: MA_DAILY_TASK_PATH };
+  return { label: "Continue Math Academy", path };
 }
 
 // Denver-local "today" as YYYY-MM-DD. Identical helper to the
@@ -233,7 +235,10 @@ export default async function handler(req, res) {
     const dailyGoalXp = pickTodayGoal(studentObj.schedule);
 
     const course = studentObj.currentCourse || null;
-    const nextDrill = buildNextDrill({ course, dailyGoalXp, todayXp });
+    // Numeric id is the stable URL identifier on mathacademy.com,
+    // even when external_id stores a username instead.
+    const maNumericId = studentObj.id ?? null;
+    const nextDrill = buildNextDrill({ course, dailyGoalXp, todayXp, maNumericId });
 
     // League is null on the MA student object when the student isn't
     // currently enrolled in one — pass through verbatim, including null.
@@ -263,7 +268,7 @@ export const __test__ = {
   denverDayOfWeek,
   pickTodayGoal,
   buildNextDrill,
+  dailyTaskPath,
   SCHEDULE_KEYS,
   MA_BASE_URL,
-  MA_DAILY_TASK_PATH,
 };

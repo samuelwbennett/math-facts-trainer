@@ -1,0 +1,10 @@
+{
+  "name": "reading-facts-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reading Facts trainer — vanilla ESM frontend + Vercel /api serverless functions",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.105.1"
+  }
+}

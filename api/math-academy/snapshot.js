@@ -46,6 +46,42 @@ const SCHEDULE_KEYS = [
   "thuGoal", "friGoal", "satGoal",
 ];
 
+// Math Academy's daily-task screen for logged-in students. This is
+// the canonical "do today's work" entry point. If MA changes their
+// URL scheme, this is the only string to edit.
+const MA_DAILY_TASK_PATH = "/learn";
+
+// Build the nextDrill object that the dashboard uses for the launch
+// button label. Three cases, in priority order:
+//   1. Rest day (dailyGoalXp === 0) → friendly "Rest day" copy.
+//   2. Goal hit (todayXp >= goal && goal > 0) → bonus-practice copy.
+//   3. Has a current course → "<Course> — N% complete".
+//   4. Fallback → generic "Continue Math Academy".
+// All variants deep-link to /learn so the click actually starts work.
+function buildNextDrill({ course, dailyGoalXp, todayXp }) {
+  if (dailyGoalXp === 0) {
+    return {
+      label: "Rest day — bonus practice?",
+      path: MA_DAILY_TASK_PATH,
+    };
+  }
+  if (todayXp >= dailyGoalXp && dailyGoalXp > 0) {
+    return {
+      label: course
+        ? `${course.name} — goal complete`
+        : "Daily goal complete",
+      path: MA_DAILY_TASK_PATH,
+    };
+  }
+  if (course) {
+    return {
+      label: `${course.name} — ${Math.round((course.progress ?? 0) * 100)}% complete`,
+      path: MA_DAILY_TASK_PATH,
+    };
+  }
+  return { label: "Continue Math Academy", path: MA_DAILY_TASK_PATH };
+}
+
 // Denver-local "today" as YYYY-MM-DD. Identical helper to the
 // math-facts and reading-facts snapshot endpoints.
 function denverDateISO() {
@@ -162,6 +198,7 @@ export default async function handler(req, res) {
           label: "Connect Math Academy account",
           path: "/",
         },
+        league: null,
         _notLinked: true,
       });
     }
@@ -192,15 +229,11 @@ export default async function handler(req, res) {
     const dailyGoalXp = pickTodayGoal(studentObj.schedule);
 
     const course = studentObj.currentCourse || null;
-    const nextDrill = course
-      ? {
-          label: `${course.name} — ${Math.round((course.progress ?? 0) * 100)}% complete`,
-          // Mathacademy.com's student-facing route format isn't
-          // documented, so we deep-link to the homepage for now.
-          // Refine once we know the canonical /students/<id> URL.
-          path: "/",
-        }
-      : { label: "Continue Math Academy", path: "/" };
+    const nextDrill = buildNextDrill({ course, dailyGoalXp, todayXp });
+
+    // League is null on the MA student object when the student isn't
+    // currently enrolled in one — pass through verbatim, including null.
+    const league = studentObj.league || null;
 
     return res.status(200).json({
       studentId,
@@ -209,6 +242,7 @@ export default async function handler(req, res) {
       weekXp,
       dailyGoalXp,
       nextDrill,
+      league,
     });
   } catch (err) {
     return res.status(500).json({
@@ -224,6 +258,8 @@ export const __test__ = {
   denverDateNDaysAgo,
   denverDayOfWeek,
   pickTodayGoal,
+  buildNextDrill,
   SCHEDULE_KEYS,
   MA_BASE_URL,
+  MA_DAILY_TASK_PATH,
 };

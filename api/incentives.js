@@ -42,6 +42,10 @@ const RULES = {
   dollarsPerDay:    2.00,   // $2 per weekday present
   weekdayPayout:    true,   // earn Mon–Fri only
   weeklyDollarsCap: 10.00,  // $2 × 5 weekdays
+  // Students can only cash out at this minimum. Set to one perfect
+  // week so kids can't redeem $2 here and $4 there — they wait for
+  // the full $10 and then the admin pays them out in cash.
+  minRedemptionDollars: 10.00,
   // Default redemption split shown in the UI; students can change at
   // redemption time.
   defaultSplit:    { store: 0.5, scholarship: 0.5 },
@@ -163,7 +167,7 @@ async function handleGet(req, res, supabase, studentId) {
       .order("day", { ascending: true }),
     supabase
       .from("incentive_redemptions")
-      .select("id, total_dollars, store_amount, scholarship_amount, note, redeemed_at")
+      .select("id, total_dollars, store_amount, scholarship_amount, note, redeemed_at, status, fulfilled_at, fulfilled_by")
       .eq("student_id", studentId)
       .order("redeemed_at", { ascending: false }),
   ]);
@@ -172,7 +176,18 @@ async function handleGet(req, res, supabase, studentId) {
   if (redemptionsRes.error) throw redemptionsRes.error;
 
   const { ledger, totalEarned } = buildLedger(progressRes.data || []);
-  const totalRedeemed = (redemptionsRes.data || [])
+  const allRedemptions = redemptionsRes.data || [];
+  // Cancelled redemptions don't reduce the balance — they refund.
+  // Pending + fulfilled both lock the dollars (admin will pay it out).
+  const activeRedemptions = allRedemptions.filter(
+    (r) => r.status !== "cancelled",
+  );
+  const pendingRedemptions = allRedemptions.filter(
+    (r) => r.status === "pending",
+  );
+  const totalRedeemed = activeRedemptions
+    .reduce((s, r) => s + Number(r.total_dollars), 0);
+  const totalPending = pendingRedemptions
     .reduce((s, r) => s + Number(r.total_dollars), 0);
   const available = Math.max(0, Math.round((totalEarned - totalRedeemed) * 100) / 100);
 
@@ -193,6 +208,7 @@ async function handleGet(req, res, supabase, studentId) {
     earnings: {
       totalEarned,
       totalRedeemed,
+      totalPending,
       available,
       today: todayEarned,
       thisWeek: Math.round(weekEarned * 100) / 100,
@@ -210,13 +226,18 @@ async function handleGet(req, res, supabase, studentId) {
       dollarsPerDay: RULES.dollarsPerDay,
       weekdayPayout: RULES.weekdayPayout,
       weeklyDollarsCap: RULES.weeklyDollarsCap,
+      minRedemptionDollars: RULES.minRedemptionDollars,
       defaultSplit: RULES.defaultSplit,
       // --- legacy compat (old client expectations) ---
       ratePerXp: 0,
       dailyDollarsCap: RULES.dollarsPerDay,
     },
     ledger: ledger.slice(-30),
-    redemptions: redemptionsRes.data || [],
+    // Full list, newest first. UI uses this to render both the
+    // history view and the "Pending: $X awaiting your admin"
+    // banner. status is one of {pending, fulfilled, cancelled}.
+    redemptions: allRedemptions,
+    pendingRedemptions,
   });
 }
 
@@ -239,6 +260,15 @@ async function handlePost(req, res, supabase, studentId) {
     });
   }
 
+  // Minimum-redemption gate. Stops half-empty cash-outs and matches
+  // the UI which disables the Redeem button below this threshold.
+  if (total < RULES.minRedemptionDollars - 0.001) {
+    return res.status(400).json({
+      error: `redemption must be at least $${RULES.minRedemptionDollars.toFixed(2)}`,
+      minRedemptionDollars: RULES.minRedemptionDollars,
+    });
+  }
+
   const ninetyDaysAgo = new Date(Date.now() - 90 * 86400000)
     .toISOString().slice(0, 10);
   const [progressRes, redemptionsRes] = await Promise.all([
@@ -250,14 +280,16 @@ async function handlePost(req, res, supabase, studentId) {
       .order("day", { ascending: true }),
     supabase
       .from("incentive_redemptions")
-      .select("total_dollars")
+      .select("total_dollars, status")
       .eq("student_id", studentId),
   ]);
   if (progressRes.error) throw progressRes.error;
   if (redemptionsRes.error) throw redemptionsRes.error;
 
   const { totalEarned } = buildLedger(progressRes.data || []);
+  // Same logic as handleGet: cancelled refunds, pending + fulfilled lock.
   const totalRedeemed = (redemptionsRes.data || [])
+    .filter((r) => r.status !== "cancelled")
     .reduce((s, r) => s + Number(r.total_dollars), 0);
   const available = Math.max(0, totalEarned - totalRedeemed);
 
@@ -275,6 +307,7 @@ async function handlePost(req, res, supabase, studentId) {
       store_amount: store,
       scholarship_amount: scholarship,
       note,
+      status: "pending",
     })
     .select()
     .maybeSingle();

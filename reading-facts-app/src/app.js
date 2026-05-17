@@ -13,6 +13,7 @@
 // ============================================================
 
 import { QUESTIONS } from "../data/questions.js";
+import { consumeSessionFragment } from "./sessionBridge.js";
 import {
   getSession,
   onAuthChange,
@@ -235,6 +236,10 @@ const app = document.getElementById("app");
 async function boot() {
   try {
     renderLoading("Loading…");
+
+    // Silent cross-app sign-in from the orchestration layer's
+    // "Start Now" button — consumes #vpa_session= if present.
+    await consumeSessionFragment();
 
     session = await getSession();
 

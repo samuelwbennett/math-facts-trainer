@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron-math-academy-sync",
+      "schedule": "30 12 * * *"
+    }
+  ]
+}

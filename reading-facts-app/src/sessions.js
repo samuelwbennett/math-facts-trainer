@@ -10,6 +10,7 @@
 // ============================================================
 
 import { supabase } from "./supabase.js";
+import { bumpDailyProgress } from "./dailyProgress.js";
 
 let todayCache = null;
 let todayCacheStudentId = null;
@@ -47,6 +48,13 @@ export async function recordSession({
     console.warn("Failed to record reading session:", error.message);
     return;
   }
+
+  // Also bump daily_progress so the attendance economy + cross-app
+  // XP rollup see this session. Fire-and-forget — failure here is
+  // non-fatal for the session itself, which is already persisted.
+  bumpDailyProgress({ studentId, durationSec }).catch((e) =>
+    console.warn("[sessions] bumpDailyProgress failed:", e),
+  );
 
   // Invalidate today cache so the next getTodayStats() refetches.
   todayCache = null;

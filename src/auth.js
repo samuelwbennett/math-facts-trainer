@@ -1,6 +1,31 @@
 import { useState, useEffect } from "react";
 import { supabase } from "./supabase";
 
+// Reading-academy's /api/provision-self — idempotently creates a
+// user_profiles row on first sign-in. Bridges Math Facts onto the
+// orchestration layer's unified role model without any data
+// migration. Fire-and-forget: if it fails, the app still works,
+// the next sign-in retries.
+const PROVISION_SELF_URL =
+  "https://reading-academy.vercel.app/api/provision-self";
+
+async function provisionSelfQuiet(session) {
+  if (!session?.access_token) return;
+  try {
+    await fetch(PROVISION_SELF_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: "{}",
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[auth] provision-self failed (non-blocking):", err);
+  }
+}
+
 // React hook: returns { session, loading } and re-renders on auth changes.
 export function useAuth() {
   const [session, setSession] = useState(null);
@@ -13,6 +38,7 @@ export function useAuth() {
       if (!mounted) return;
       setSession(data.session);
       setLoading(false);
+      if (data.session) provisionSelfQuiet(data.session);
     });
 
     const {
@@ -20,6 +46,7 @@ export function useAuth() {
     } = supabase.auth.onAuthStateChange((_event, newSession) => {
       if (!mounted) return;
       setSession(newSession);
+      if (newSession) provisionSelfQuiet(newSession);
     });
 
     return () => {

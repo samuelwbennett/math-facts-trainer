@@ -47,6 +47,16 @@ const DIAGNOSTIC_LENGTH = 12;      // first-ever quiz: longer + spans difficulti
 const MIN_DIFFICULTY = 1;
 const MAX_DIFFICULTY = 3;
 
+// Daily-XP loop, mirroring the math facts app: 1 minute of active
+// quiz time = 1 XP; daily goal = 5 XP (i.e., ~5 minutes of practice
+// per day fills the effort ring). Both apps share the same units so
+// future cross-app reporting works without translation.
+const DAILY_GOAL_XP = 5;
+function xpFromSec(sec) {
+  // One decimal place, e.g. 90 sec → 1.5 XP.
+  return Math.round((sec / 60) * 10) / 10;
+}
+
 // The four learning strands the home screen offers as cards. Each
 // strand is an aggregation of atom types that fit together
 // pedagogically. Click a strand card on home → start a quiz filtered
@@ -194,7 +204,7 @@ let viewedStrand = null;
 
 // Cache of today's session stats; populated by enterStudent and
 // refreshed after each quiz so renderHome can render rings synchronously.
-let todayStats = { sessions: 0, total_attempts: 0, correct_count: 0, mastered_count: 0 };
+let todayStats = { sessions: 0, total_attempts: 0, correct_count: 0, mastered_count: 0, duration_sec: 0 };
 
 function effectiveQuizLength() {
   return isDiagnostic ? DIAGNOSTIC_LENGTH : QUIZ_LENGTH;
@@ -313,7 +323,7 @@ async function enterStudent(student) {
     todayStats = await getTodayStats(student.id);
   } catch (e) {
     console.warn("Today stats load failed:", e);
-    todayStats = { sessions: 0, total_attempts: 0, correct_count: 0, mastered_count: 0 };
+    todayStats = { sessions: 0, total_attempts: 0, correct_count: 0, mastered_count: 0, duration_sec: 0 };
   }
 
   // First-time student: jump straight into the diagnostic quiz.
@@ -482,7 +492,7 @@ function enterGuestMode() {
   isDiagnostic = false; // guests skip diagnostic — no persistence anyway
   currentStudent = { id: "guest", display_name: "Guest" };
   loadMastery("guest"); // clears the cache
-  todayStats = { sessions: 0, total_attempts: 0, correct_count: 0, mastered_count: 0 };
+  todayStats = { sessions: 0, total_attempts: 0, correct_count: 0, mastered_count: 0, duration_sec: 0 };
   quizFilter = null;
   screen = "home";
   resetQuiz();
@@ -658,22 +668,28 @@ function renderHome() {
   const rec = recommendedStrand();
   const overallMastered = isGuest ? 0 : masteredAtomCount();
 
+  // XP-based daily plan, matching the math facts loop. Every minute
+  // of session time = 1 XP. Effort ring fills as XP approaches goal.
+  const todayXp = xpFromSec(todayStats.duration_sec || 0);
+  const goalHit = todayXp >= DAILY_GOAL_XP;
+  const remainingMin = Math.max(0, Math.ceil(DAILY_GOAL_XP - todayXp));
+
   let planLine;
   if (isGuest) {
     planLine = "Try any strand to start.";
+  } else if (goalHit) {
+    planLine = "Goal complete — bonus rep?";
   } else if (!rec) {
     planLine = "Everything mastered — keep refreshing!";
   } else {
-    const s = computeStrandStats(rec);
-    const left = s.total - s.mastered;
-    planLine = `Practice ${STRANDS[rec].label} — ${left} atom${left === 1 ? "" : "s"} left`;
+    planLine = `${remainingMin} min · Start with ${STRANDS[rec].label}`;
   }
 
-  // Today's rings (filled from sessions table). Effort = sessions today
-  // / 1 (1 quiz per day = full effort ring); accuracy = today's correct /
-  // attempts; mastery = today's mastered / attempts.
-  const dailyTarget = 1; // 1 completed quiz per day = full effort ring
-  const effort = Math.min(1, todayStats.sessions / dailyTarget);
+  // Rings derive from today's quiz performance:
+  //   effort   = today's XP / daily goal
+  //   accuracy = today's correct / today's attempts
+  //   mastery  = today's mastered / today's attempts
+  const effort = Math.min(1, todayXp / DAILY_GOAL_XP);
   const accuracy = todayStats.total_attempts > 0
     ? todayStats.correct_count / todayStats.total_attempts : 0;
   const mastery = todayStats.total_attempts > 0
@@ -709,8 +725,8 @@ function renderHome() {
     <div class="rings-wrap home-rings">
       ${ringsSvg(effort, accuracy, mastery, 180, 14, 5)}
       <div class="rings-center">
-        <div class="rings-xp">${todayStats.mastered_count}</div>
-        <div class="rings-label">today</div>
+        <div class="rings-xp">${todayXp.toFixed(1)}</div>
+        <div class="rings-label">of ${DAILY_GOAL_XP} XP</div>
       </div>
     </div>
 

@@ -56,7 +56,10 @@ export async function recordSession({
 // over (so refreshing the home screen many times doesn't hit Supabase
 // each time). Returns zeros if no rows or guest.
 export async function getTodayStats(studentId) {
-  const empty = { sessions: 0, total_attempts: 0, correct_count: 0, mastered_count: 0 };
+  const empty = {
+    sessions: 0, total_attempts: 0, correct_count: 0,
+    mastered_count: 0, duration_sec: 0,
+  };
   if (!studentId || studentId === "guest"
       || String(studentId).startsWith("local-")) {
     return empty;
@@ -87,6 +90,7 @@ export async function getTodayStats(studentId) {
       total_attempts: acc.total_attempts + (r.total_attempts || 0),
       correct_count:  acc.correct_count  + (r.correct_count  || 0),
       mastered_count: acc.mastered_count + (r.mastered_count || 0),
+      duration_sec:   acc.duration_sec   + (r.duration_sec   || 0),
     }),
     empty
   );

@@ -172,6 +172,40 @@ function MathFactsApp({ student, onSignOut, onSwitchStudent }) {
 }
 
 // ============================================================
+// StrandStrip — per-op visible progression strip
+//
+// Renders one chip per strand in unlock order. Each chip is filled
+// (complete), partial (active with progress fill), or hollow (locked).
+// The active strand chip is highlighted. Shows up under each op card
+// on the Home screen so the kid can SEE that the curriculum is a
+// sequence, not just a single big pool.
+// ============================================================
+function StrandStrip({ strands }) {
+  return (
+    <div className="strand-strip" title={strandStripTitle(strands)}>
+      {strands.map((s) => {
+        const cls =
+          s.status === "complete" ? "strand-chip complete"
+          : s.status === "active" ? "strand-chip active"
+          : "strand-chip locked";
+        const fill = s.total > 0 ? Math.round((s.masteredCount / s.total) * 100) : 0;
+        return (
+          <div key={s.id} className={cls} title={`${s.label} — ${s.masteredCount}/${s.total}`}>
+            <div className="strand-chip-fill" style={{ width: `${fill}%` }} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function strandStripTitle(strands) {
+  const done = strands.filter((s) => s.status === "complete").length;
+  const total = strands.length;
+  return `Strand progress: ${done} / ${total}`;
+}
+
+// ============================================================
 // HOME — today's rings + operation picker
 // ============================================================
 function Home({ persisted, student, onStart, onSignOut, onSwitchStudent }) {
@@ -275,7 +309,16 @@ function Home({ persisted, student, onStart, onSignOut, onSwitchStudent }) {
           {Object.values(engine.OPERATIONS).map((op) => {
             const locked = !engine.isOpUnlocked(op.key, persisted);
             const isRecommended = op.key === rec.op && !goalHit && !locked;
-            const summary = engine.masterySummary(persisted, op.key);
+
+            // Strand-aware metadata. Falls back to old summary if the
+            // strand data isn't loaded yet (shouldn't happen, but
+            // defensive).
+            const strands = !locked
+              ? engine.strandStatuses(persisted.progress[op.key]?.facts || {}, op.key)
+              : [];
+            const activeStrand = strands.find((s) => s.status === "active");
+            const completedCount = strands.filter((s) => s.status === "complete").length;
+            const totalStrands = strands.length;
 
             let meta, subMeta;
             if (locked && op.key === "division") {
@@ -285,9 +328,13 @@ function Home({ persisted, student, onStart, onSignOut, onSwitchStudent }) {
             } else if (locked) {
               meta = "Locked";
               subMeta = null;
+            } else if (activeStrand) {
+              meta = activeStrand.label;
+              subMeta = `${activeStrand.masteredCount} / ${activeStrand.total} · strand ${completedCount + 1} of ${totalStrands}`;
             } else {
-              meta = `${summary.automatic} / ${summary.total} mastered`;
-              subMeta = summary.gainedToday > 0 ? `+${summary.gainedToday} today` : null;
+              // Every strand complete!
+              meta = "All strands mastered";
+              subMeta = "Bonus practice keeps facts sharp";
             }
 
             return (
@@ -301,13 +348,8 @@ function Home({ persisted, student, onStart, onSignOut, onSwitchStudent }) {
                 <span className="op-label">{op.label}</span>
                 <span className="op-meta">{meta}</span>
                 {subMeta && <span className="op-submeta">{subMeta}</span>}
-                {!locked && (
-                  <div className="op-progress-track">
-                    <div
-                      className="op-progress-fill"
-                      style={{ width: `${summary.pct * 100}%` }}
-                    />
-                  </div>
+                {!locked && strands.length > 0 && (
+                  <StrandStrip strands={strands} />
                 )}
               </button>
             );
@@ -328,7 +370,7 @@ function Session({ op, persisted, onComplete }) {
   const [facts, setFacts] = useState(startProg.facts);
   const [currentLevel, setCurrentLevel] = useState(startProg.currentLevel);
   const [currentId, setCurrentId] = useState(() =>
-    engine.selectNextFact(startProg.facts, null, startProg.currentLevel, op).id
+    engine.selectNextFact(startProg.facts, null, op).id
   );
   const [input, setInput] = useState("");
   const [feedback, setFeedback] = useState("");
@@ -486,12 +528,21 @@ function Session({ op, persisted, onComplete }) {
       setFeedbackKind("bad");
     }
 
-    // Auto-expand difficulty
+    // Strand-completion → unlock toast. Compare the active strand
+    // before/after this attempt; if it changed, the previous strand
+    // just completed and a new strand is now active.
+    const prevActiveId = engine.activeStrandId(facts, op);
+    const nextActiveId = engine.activeStrandId(newFacts, op);
     let newLevel = currentLevel;
-    if (engine.shouldExpand(newFacts, currentLevel, op)) {
+    if (prevActiveId !== nextActiveId && nextActiveId) {
+      const def = engine.strandById?.(nextActiveId);
+      setUnlockNotice(def ? `Unlocked: ${def.label}` : "New strand unlocked");
+    } else if (engine.shouldExpand(newFacts, currentLevel, op)) {
+      // Legacy level-up path — kept harmless for any old data. With
+      // strand-based selection currentLevel no longer drives the
+      // fact pool, but bumping it keeps the storage shape stable.
       newLevel = currentLevel + 1;
       setCurrentLevel(newLevel);
-      setUnlockNotice("New facts unlocked");
     }
 
     setFacts(newFacts);
@@ -518,7 +569,7 @@ function Session({ op, persisted, onComplete }) {
       return;
     }
 
-    const next = engine.selectNextFact(newFacts, updated.id, newLevel, op);
+    const next = engine.selectNextFact(newFacts, updated.id, op);
     setCurrentId(next.id);
     setInput("");
   }

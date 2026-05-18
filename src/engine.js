@@ -1,10 +1,24 @@
 // ---------- CONFIG ----------
+import { STRANDS_BY_OP, strandIdFor, strandById, TWO_DIGIT_BUILDERS } from "./curriculum.js";
+
+// Re-export so the rest of the app can stay on a single engine import.
+export { strandIdFor, strandById, STRANDS_BY_OP };
+
 export const OPERATIONS = {
   addition:       { key: "addition",       symbol: "+", label: "Addition" },
   subtraction:    { key: "subtraction",    symbol: "−", label: "Subtraction" },
   multiplication: { key: "multiplication", symbol: "×", label: "Multiplication" },
   division:       { key: "division",       symbol: "÷", label: "Division" },
 };
+
+// Strand-completion threshold: a strand is "done" (and the next one
+// auto-unlocks) when >= this fraction of its facts are at `known` or
+// `automatic`. 0.75 = 3/4 of the strand's facts.
+export const STRAND_COMPLETE_RATIO = 0.75;
+
+// How often selectNextFact pulls a retention rep from a previously-
+// completed strand instead of the active strand. Spaced retention.
+export const RETENTION_RATE = 0.18;
 
 // Per-operation latency thresholds (ms).
 // Recalibrated 2026-05-18 from Isaac's real session data — old values
@@ -97,9 +111,12 @@ function buildSubtraction() {
 }
 
 function buildMultiplication() {
+  // Now includes a,b in 0..12 (was 2..12) so the ×0 and ×1 strands
+  // have content. The old pool of 2..12 was a 121-fact subset; the
+  // new pool is 169 facts.
   const facts = {};
-  for (let a = 2; a <= 12; a++) {
-    for (let b = 2; b <= 12; b++) {
+  for (let a = 0; a <= 12; a++) {
+    for (let b = 0; b <= 12; b++) {
       const id = `mul-${a}x${b}`;
       facts[id] = { id, op: "multiplication", a, b, answer: a * b, difficulty: Math.max(a, b), ...emptyTracking() };
     }
@@ -108,10 +125,13 @@ function buildMultiplication() {
 }
 
 function buildDivision() {
-  // a / b = q where a = b*q, b and q in 2..12
+  // a / b = q where a = b*q.
+  // Was: b,q in 2..12. Now: b in 1..12, q in 1..12 (excluding b=0
+  // which is undefined). Gives us ÷1, ÷self, and ÷-by-larger
+  // identity facts the strand curriculum expects.
   const facts = {};
-  for (let q = 2; q <= 12; q++) {
-    for (let b = 2; b <= 12; b++) {
+  for (let q = 1; q <= 12; q++) {
+    for (let b = 1; b <= 12; b++) {
       const a = b * q;
       const id = `div-${a}d${b}`;
       facts[id] = { id, op: "division", a, b, answer: q, difficulty: Math.max(b, q), ...emptyTracking() };
@@ -120,7 +140,7 @@ function buildDivision() {
   return facts;
 }
 
-export function buildFacts(op) {
+function build1Digit(op) {
   switch (op) {
     case "addition":       return buildAddition();
     case "subtraction":    return buildSubtraction();
@@ -128,6 +148,31 @@ export function buildFacts(op) {
     case "division":       return buildDivision();
     default: return {};
   }
+}
+
+// Merge curated 2-digit (and longer) fact pools into the base
+// 1-digit pool. Every fact then gets tagged with its strand id.
+export function buildFacts(op) {
+  const facts = build1Digit(op);
+  // Append curated multi-digit facts from curriculum.js
+  for (const [, spec] of Object.entries(TWO_DIGIT_BUILDERS)) {
+    if (spec.op !== op) continue;
+    for (const { a, b, answer } of spec.build()) {
+      const id = spec.makeId(a, b);
+      if (facts[id]) continue; // don't clobber 1-digit version if any overlap
+      facts[id] = {
+        id, op, a, b, answer,
+        difficulty: Math.max(a, b),
+        ...emptyTracking(),
+      };
+    }
+  }
+  // Tag every fact with its sub-strand. First-match-wins (the
+  // curriculum.js order is the unlock order).
+  for (const f of Object.values(facts)) {
+    f.strand = strandIdFor(op, f);
+  }
+  return facts;
 }
 
 export function initialProgress(op) {
@@ -224,13 +269,109 @@ function priorityFor(fact, op, today) {
   return p;
 }
 
-export function selectNextFact(facts, lastId, currentLevel, op) {
-  const today = todayKey();
-  const pool = Object.values(facts).filter(f => f.difficulty <= currentLevel && f.id !== lastId);
-  if (pool.length === 0) {
-    return Object.values(facts).filter(f => f.id !== lastId)[0] || Object.values(facts)[0];
+// ============================================================
+// Sub-strand helpers
+// ============================================================
+
+// Stats for one strand: counts + completion status.
+//   total      — how many facts belong to this strand
+//   attempted  — facts the student has seen at least once
+//   masteredCount — facts at `known` or `automatic`
+//   pct        — masteredCount / total (0..1)
+//   complete   — pct >= STRAND_COMPLETE_RATIO
+export function strandProgress(facts, strandId) {
+  let total = 0, attempted = 0, masteredCount = 0;
+  for (const f of Object.values(facts)) {
+    if (f.strand !== strandId) continue;
+    total += 1;
+    if (f.attempts > 0) attempted += 1;
+    if (f.state === "known" || f.state === "automatic") masteredCount += 1;
   }
-  const scored = pool.map(f => ({ fact: f, p: priorityFor(f, op, today) }));
+  const pct = total === 0 ? 0 : masteredCount / total;
+  return {
+    total,
+    attempted,
+    masteredCount,
+    pct,
+    complete: pct >= STRAND_COMPLETE_RATIO,
+  };
+}
+
+// Full strand-status array for an op, in unlock order:
+//   [{ id, label, description, status, ...progress }]
+// status ∈ {complete, active, locked}.
+// Exactly one strand is `active` (the first non-complete strand).
+// Strands after the active one are `locked`.
+export function strandStatuses(facts, op) {
+  const strands = STRANDS_BY_OP[op] || [];
+  const out = [];
+  let activeSeen = false;
+  for (const s of strands) {
+    const prog = strandProgress(facts, s.id);
+    let status;
+    if (prog.complete) status = "complete";
+    else if (!activeSeen) {
+      status = "active";
+      activeSeen = true;
+    } else status = "locked";
+    out.push({
+      id: s.id,
+      label: s.label,
+      description: s.description,
+      status,
+      ...prog,
+    });
+  }
+  return out;
+}
+
+// The currently-active strand id (the one the student should
+// practice right now). Returns null if every strand is complete.
+export function activeStrandId(facts, op) {
+  const statuses = strandStatuses(facts, op);
+  const active = statuses.find((s) => s.status === "active");
+  return active ? active.id : null;
+}
+
+// ============================================================
+
+// Pick the next fact to drill. Strand-aware:
+//   - With probability RETENTION_RATE, pull from a previously-
+//     completed strand (spaced retention). Only if such strands exist.
+//   - Otherwise pull from the active strand.
+//   - Within the chosen pool, use the existing priority logic +
+//     5-fact weighted random pick.
+//
+// `op` is required; `currentLevel` no longer used and accepted as
+// undefined for backward compat from any caller still passing it.
+export function selectNextFact(facts, lastId, op) {
+  const today = todayKey();
+  const statuses = strandStatuses(facts, op);
+  const activeId = statuses.find((s) => s.status === "active")?.id || null;
+  const completeIds = statuses.filter((s) => s.status === "complete").map((s) => s.id);
+
+  // Decide which strand pool to draw from.
+  let strandPool;
+  if (completeIds.length > 0 && Math.random() < RETENTION_RATE) {
+    const retentionId = completeIds[Math.floor(Math.random() * completeIds.length)];
+    strandPool = retentionId;
+  } else {
+    strandPool = activeId || completeIds[completeIds.length - 1] || null;
+  }
+
+  let pool;
+  if (strandPool) {
+    pool = Object.values(facts).filter(
+      (f) => f.strand === strandPool && f.id !== lastId,
+    );
+  } else {
+    pool = Object.values(facts).filter((f) => f.id !== lastId);
+  }
+  if (pool.length === 0) {
+    return Object.values(facts).filter((f) => f.id !== lastId)[0]
+        || Object.values(facts)[0];
+  }
+  const scored = pool.map((f) => ({ fact: f, p: priorityFor(f, op, today) }));
   scored.sort((a, b) => b.p - a.p);
   const top = scored.slice(0, 5);
   const totalP = top.reduce((s, x) => s + Math.max(x.p, 1), 0);

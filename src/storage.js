@@ -4,7 +4,8 @@
 //   { progress: { addition, subtraction, multiplication, division }, history: { [day]: { totalActiveSec, sessions[] } } }
 
 import { supabase } from "./supabase";
-import { determineState, LATENCY_CAP_MS } from "./engine";
+import { determineState, LATENCY_CAP_MS, buildFacts } from "./engine";
+import { strandIdFor } from "./curriculum";
 
 const APP_SLUG = "math_facts";
 const HISTORY_DAYS = 30; // how many days of history to load up front
@@ -150,14 +151,35 @@ export async function loadStudentState(studentId) {
 }
 
 // Walk the loaded progress and re-classify every fact with the
-// current engine logic. Idempotent — safe to call on every load.
-// Also caps stored latencies so a pre-fix walk-away (e.g. 22-min
-// pause poisoning avgLatency) gets corrected.
+// current engine logic + tag with sub-strand. Idempotent — safe to
+// call on every load. Three things it does:
+//   1. Caps stored latencies so a pre-fix walk-away (22-min pause)
+//      gets corrected.
+//   2. Re-runs determineState so old `state` values written under
+//      pre-2026-05-18 logic get upgraded to the new ladder.
+//   3. Tags every fact with its sub-strand (from curriculum.js).
+//      Old persisted facts didn't have this field — without it the
+//      strand UI shows everything as "uncategorized" until each fact
+//      is touched again.
 function refreshFactStates(progress) {
   if (!progress) return;
   for (const op of Object.keys(progress)) {
     const facts = progress[op]?.facts;
     if (!facts) continue;
+
+    // 0. Merge in any new facts that aren't in the persisted dict
+    //    (e.g., the 2-digit pools introduced in Phase 2). Existing
+    //    facts keep their attempts/state/latency — we just ADD any
+    //    new entries from the current buildFacts(op). Without this,
+    //    a kid who built progress under the old 0-12 schema would
+    //    never see the new 2-digit strands.
+    const canonical = buildFacts(op);
+    for (const id of Object.keys(canonical)) {
+      if (!facts[id]) {
+        facts[id] = canonical[id];
+      }
+    }
+
     for (const id of Object.keys(facts)) {
       const f = facts[id];
       if (!f) continue;
@@ -170,6 +192,8 @@ function refreshFactStates(progress) {
       if (f.attempts > 0) {
         f.state = determineState(f, op);
       }
+      // Tag (or re-tag) the strand. Cheap — pure function over (op, a, b).
+      f.strand = strandIdFor(op, f);
     }
   }
 }

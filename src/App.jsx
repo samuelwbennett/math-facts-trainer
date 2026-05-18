@@ -372,6 +372,15 @@ function Session({ op, persisted, onComplete }) {
   const [currentId, setCurrentId] = useState(() =>
     engine.selectNextFact(startProg.facts, null, op).id
   );
+  // Phase 4 — missing-operand presentation rotation. A fact in `known`
+  // or `automatic` state has a 1-in-3 chance of being presented as
+  // "? + b = c" or "a + ? = c" instead of "a + b = ?". Adds variety
+  // and forces deeper retrieval. Symbolic by default for un-mastered
+  // facts so the student can build the standard form first.
+  // Numbers facts always render their own displayText, regardless.
+  const [currentPresentation, setCurrentPresentation] = useState(() =>
+    pickPresentation(startProg.facts[currentId]),
+  );
   const [input, setInput] = useState("");
   const [feedback, setFeedback] = useState("");
   const [feedbackKind, setFeedbackKind] = useState("");
@@ -399,7 +408,13 @@ function Session({ op, persisted, onComplete }) {
   const startRef = useRef(Date.now());
   const inputRef = useRef(null);
 
-  const fact = facts[currentId];
+  // Merge the session-local presentation into the fact object so
+  // formatProblem and the answer-comparison logic can read it.
+  // (We don't mutate the stored fact — the presentation is a per-
+  // render choice, not persisted.)
+  const fact = facts[currentId]
+    ? { ...facts[currentId], presentation: currentPresentation }
+    : null;
 
   useEffect(() => {
     startRef.current = Date.now();
@@ -481,7 +496,20 @@ function Session({ op, persisted, onComplete }) {
     if (input === "" || done) return;
 
     const latency = Date.now() - startRef.current;
-    const correctAns = Number(input) === fact.answer;
+    // Compute expected answer based on fact's presentation.
+    //   symbolic     → answer = a OP b (= fact.answer)
+    //   missing-a    → answer = a (the missing left operand)
+    //   missing-b    → answer = b (the missing right operand)
+    // For Numbers facts (which always have displayText), the
+    // expected stays fact.answer.
+    let expected = fact.answer;
+    if (fact.presentation === "missing-a") expected = fact.a;
+    else if (fact.presentation === "missing-b") expected = fact.b;
+    // Decimal-tolerant compare so 0.25 vs "0.25" or rounding noise
+    // doesn't false-fail. Tolerance is 0.001.
+    const numInput = Number(input);
+    const correctAns =
+      Number.isFinite(numInput) && Math.abs(numInput - expected) < 0.001;
     const result = engine.classify(correctAns, latency, op);
 
     // Active-time accumulation, capped per problem to prevent idle gaming
@@ -524,7 +552,16 @@ function Session({ op, persisted, onComplete }) {
       setFeedbackKind("");
       hintedRef.current.add(updated.id);
     } else {
-      setFeedback(`${formatProblem(fact, op)} = ${fact.answer}`);
+      // Show the correct answer. For numbers facts and missing-operand
+      // we just show "= <expected>" since the problem itself is the
+      // displayText.
+      setFeedback(
+        fact.displayText
+          ? `${fact.displayText} = ${expected}`
+          : fact.presentation === "missing-a" || fact.presentation === "missing-b"
+          ? `Answer: ${expected}`
+          : `${formatProblem(fact, op)} = ${expected}`,
+      );
       setFeedbackKind("bad");
     }
 
@@ -571,6 +608,7 @@ function Session({ op, persisted, onComplete }) {
 
     const next = engine.selectNextFact(newFacts, updated.id, op);
     setCurrentId(next.id);
+    setCurrentPresentation(pickPresentation(newFacts[next.id]));
     setInput("");
   }
 
@@ -613,7 +651,7 @@ function Session({ op, persisted, onComplete }) {
             autoFocus
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            inputMode="numeric"
+            inputMode={op === "numbers" ? "decimal" : "numeric"}
             className="answer-input"
             disabled={done || currentHint !== null}
           />
@@ -694,8 +732,33 @@ function HintCard({ hint, onDone }) {
   );
 }
 
+// Phase 4 — decide how to present a fact.
+//   - Numbers facts always render their displayText (no rotation).
+//   - Facts in `known` or `automatic` state: 1-in-3 chance of being
+//     shown as missing-operand. Equal chance of missing-a or missing-b.
+//   - Everything else: symbolic.
+// Pure function — call when picking a new fact for the screen.
+function pickPresentation(fact) {
+  if (!fact || fact.displayText) return "symbolic";
+  if (fact.state !== "known" && fact.state !== "automatic") return "symbolic";
+  if (Math.random() >= 1 / 3) return "symbolic";
+  return Math.random() < 0.5 ? "missing-a" : "missing-b";
+}
+
 function formatProblem(fact, op) {
+  // Phase 4: missing-operand presentations. Pure rendering — the
+  // canonical answer is still fact.answer; only the display changes.
+  // The presentation is decided in startSession() (see prepareFact).
+  if (fact.displayText) {
+    return fact.displayText;
+  }
   const symbol = engine.OPERATIONS[op].symbol;
+  if (fact.presentation === "missing-a") {
+    return `? ${symbol} ${fact.b} = ${fact.answer}`;
+  }
+  if (fact.presentation === "missing-b") {
+    return `${fact.a} ${symbol} ? = ${fact.answer}`;
+  }
   return `${fact.a} ${symbol} ${fact.b}`;
 }
 

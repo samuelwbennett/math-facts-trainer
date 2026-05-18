@@ -9,6 +9,10 @@ export const OPERATIONS = {
   subtraction:    { key: "subtraction",    symbol: "−", label: "Subtraction" },
   multiplication: { key: "multiplication", symbol: "×", label: "Multiplication" },
   division:       { key: "division",       symbol: "÷", label: "Division" },
+  // "numbers" — Phase 3 concepts track. Percentages + fraction
+  // ↔ decimal conversions. Facts have a custom displayText (not
+  // a + b) and accept decimal answers.
+  numbers:        { key: "numbers",        symbol: "%", label: "Numbers" },
 };
 
 // Strand-completion threshold: a strand is "done" (and the next one
@@ -35,6 +39,9 @@ export const THRESHOLDS = {
   subtraction:    { fast: 1500, slow: 2500 },
   multiplication: { fast: 2000, slow: 3200 },
   division:       { fast: 2300, slow: 3800 },
+  // Numbers track answers are often decimals (4-5 chars to type) and
+  // require mental conversion. Generous thresholds.
+  numbers:        { fast: 3000, slow: 5000 },
 };
 
 // Max latency we ever store on a fact. Beyond this the student has
@@ -50,6 +57,7 @@ export const STARTER_LEVELS = {
   subtraction:    4, // a in 0..4, b ≤ a → 15 facts
   multiplication: 5, // a,b in 2..5 → 16 facts
   division:       5, // b,q in 2..5 → 16 facts
+  numbers:        1, // strand-only system; level mostly unused
 };
 
 export const SESSION_GOAL_XP   = 2;        // ~2 min focused work closes the in-session ring
@@ -140,12 +148,92 @@ function buildDivision() {
   return facts;
 }
 
+// Numbers track — percentages + fraction↔decimal conversions.
+// Each fact has displayText (what the kid sees) and answer (the
+// canonical numeric value to compare to). a/b are kept as
+// "approximation hints" for difficulty sorting but aren't displayed.
+function buildNumbers() {
+  const facts = {};
+  function add(id, displayText, answer, strandHint, a = 0, b = 0) {
+    facts[id] = {
+      id,
+      op: "numbers",
+      a, b, answer,
+      displayText,
+      difficulty: 1,
+      strandHint,
+      ...emptyTracking(),
+    };
+  }
+
+  // === Percentages of 100 ===
+  for (const p of [10, 20, 25, 50, 75, 100]) {
+    add(`num-pct100-${p}`, `${p}% of 100`, p, "num-pct-of-100", p, 100);
+  }
+  // === Percentages of common bases (10%/25%/50%/75%) ===
+  const bases = [20, 40, 60, 80, 200, 300, 1000];
+  for (const base of bases) {
+    add(`num-pct-10-${base}`, `10% of ${base}`, base * 0.1, "num-pct-common", 10, base);
+    add(`num-pct-50-${base}`, `50% of ${base}`, base * 0.5, "num-pct-common", 50, base);
+  }
+  for (const base of [40, 80, 200]) {
+    add(`num-pct-25-${base}`, `25% of ${base}`, base * 0.25, "num-pct-common", 25, base);
+    add(`num-pct-75-${base}`, `75% of ${base}`, base * 0.75, "num-pct-common", 75, base);
+  }
+
+  // === Common fraction → decimal ===
+  const fracs = [
+    ["1/2", 0.5],
+    ["1/4", 0.25],
+    ["3/4", 0.75],
+    ["1/5", 0.2],
+    ["2/5", 0.4],
+    ["3/5", 0.6],
+    ["4/5", 0.8],
+    ["1/10", 0.1],
+    ["3/10", 0.3],
+    ["7/10", 0.7],
+    ["9/10", 0.9],
+    ["1/8", 0.125],
+    ["3/8", 0.375],
+    ["5/8", 0.625],
+  ];
+  for (const [frac, dec] of fracs) {
+    const safe = frac.replace("/", "-");
+    add(`num-frac2dec-${safe}`, `${frac} as a decimal`, dec, "num-frac-to-dec", 0, 0);
+  }
+
+  // === Common percentage → decimal ===
+  for (const p of [10, 20, 25, 50, 75, 90]) {
+    add(`num-pct2dec-${p}`, `${p}% as a decimal`, p / 100, "num-pct-to-dec", p, 0);
+  }
+
+  // === Common fraction → percentage ===
+  const fracsToPct = [
+    ["1/2", 50],
+    ["1/4", 25],
+    ["3/4", 75],
+    ["1/5", 20],
+    ["2/5", 40],
+    ["1/10", 10],
+    ["3/10", 30],
+    ["7/10", 70],
+  ];
+  for (const [frac, pct] of fracsToPct) {
+    const safe = frac.replace("/", "-");
+    add(`num-frac2pct-${safe}`, `${frac} as a percent`, pct, "num-frac-to-pct", pct, 0);
+  }
+
+  return facts;
+}
+
 function build1Digit(op) {
   switch (op) {
     case "addition":       return buildAddition();
     case "subtraction":    return buildSubtraction();
     case "multiplication": return buildMultiplication();
     case "division":       return buildDivision();
+    case "numbers":        return buildNumbers();
     default: return {};
   }
 }
@@ -453,6 +541,7 @@ export function hintFor(fact) {
     case "division":       return divHint(fact);
     case "addition":       return addHint(fact);
     case "subtraction":    return subHint(fact);
+    case "numbers":        return numbersHint(fact);
     default:
       return {
         strategy: `${fact.a} ${OPERATIONS[fact.op].symbol} ${fact.b}`,
@@ -460,6 +549,52 @@ export function hintFor(fact) {
         instant: true,
       };
   }
+}
+
+// Numbers-track hints. Reads the fact's strandHint to pick the right
+// strategy. Designed to teach the conversion, not just give the answer.
+function numbersHint(fact) {
+  const sh = fact.strandHint;
+  if (sh === "num-pct-of-100") {
+    return {
+      strategy: "Percent of 100 = the percent",
+      steps: [`${fact.displayText} = ${fact.answer}`],
+      instant: true,
+    };
+  }
+  if (sh === "num-pct-common") {
+    // Try to derive a strategy from a/b
+    const pct = fact.a;
+    const base = fact.b;
+    if (pct === 10) return { strategy: "Move the decimal", steps: [`10% means ÷ 10`, `${base} ÷ 10 = ${fact.answer}`] };
+    if (pct === 50) return { strategy: "50% = half", steps: [`${base} ÷ 2 = ${fact.answer}`] };
+    if (pct === 25) return { strategy: "25% = quarter", steps: [`${base} ÷ 4 = ${fact.answer}`] };
+    if (pct === 75) return { strategy: "75% = three quarters", steps: [`${base} ÷ 4 × 3 = ${fact.answer}`] };
+    return { strategy: fact.displayText, steps: [`= ${fact.answer}`], instant: true };
+  }
+  if (sh === "num-frac-to-dec") {
+    return {
+      strategy: "Top divided by bottom",
+      steps: [`${fact.displayText.replace(" as a decimal", "")} = top ÷ bottom`, `= ${fact.answer}`],
+    };
+  }
+  if (sh === "num-pct-to-dec") {
+    return {
+      strategy: "% → divide by 100",
+      steps: [`${fact.a}% ÷ 100`, `= ${fact.answer}`],
+    };
+  }
+  if (sh === "num-frac-to-pct") {
+    return {
+      strategy: "Convert to /100",
+      steps: [fact.displayText, `= ${fact.answer}%`],
+    };
+  }
+  return {
+    strategy: fact.displayText || "Answer",
+    steps: [`= ${fact.answer}`],
+    instant: true,
+  };
 }
 
 function multHint({ a, b, answer }) {

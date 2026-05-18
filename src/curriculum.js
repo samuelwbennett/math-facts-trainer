@@ -30,8 +30,8 @@ const SD_ADD = (f) => Math.max(f.a, f.b) <= 12;
 const ADDITION_STRANDS = [
   {
     id: "add-plus-0-1",
-    label: "Plus 0 & Plus 1",
-    description: "Count on",
+    label: "+0 and +1",
+    description: "Count up by 0 or 1",
     members: (f) => SD_ADD(f) && (f.a <= 1 || f.b <= 1),
   },
   {
@@ -42,20 +42,20 @@ const ADDITION_STRANDS = [
   },
   {
     id: "add-plus-10",
-    label: "Plus 10",
-    description: "Just add a 1 in the tens place",
+    label: "+10",
+    description: "Just put a 1 in the tens place",
     members: (f) => SD_ADD(f) && (f.a === 10 || f.b === 10),
   },
   {
     id: "add-plus-9",
-    label: "Plus 9",
-    description: "Add 10, subtract 1",
+    label: "+9",
+    description: "Add 10, then take 1 away",
     members: (f) => SD_ADD(f) && (f.a === 9 || f.b === 9),
   },
   {
     id: "add-near-doubles",
     label: "Near doubles",
-    description: "Use the double + 1",
+    description: "One more than a double you know",
     members: (f) => SD_ADD(f) && Math.abs(f.a - f.b) === 1,
   },
   {
@@ -66,8 +66,8 @@ const ADDITION_STRANDS = [
   },
   {
     id: "add-bridge-10",
-    label: "Bridge 10",
-    description: "Break apart through 10",
+    label: "Through 10",
+    description: "Split to make a 10 first, then add the rest",
     members: (f) => SD_ADD(f) && f.a + f.b > 10,
   },
   {
@@ -119,7 +119,7 @@ const SD_SUB = (f) => f.a <= 12;
 const SUBTRACTION_STRANDS = [
   {
     id: "sub-minus-0-1",
-    label: "Minus 0 & Minus 1",
+    label: "−0 and −1",
     description: "Take away 0 or 1",
     members: (f) => SD_SUB(f) && f.b <= 1,
   },
@@ -131,8 +131,8 @@ const SUBTRACTION_STRANDS = [
   },
   {
     id: "sub-minus-10",
-    label: "Minus 10",
-    description: "Drop the tens",
+    label: "−10",
+    description: "Take a 10 off the front",
     members: (f) => SD_SUB(f) && f.b === 10,
   },
   {
@@ -200,14 +200,14 @@ const SD_MUL = (f) => f.a <= 12 && f.b <= 12;
 const MULTIPLICATION_STRANDS = [
   {
     id: "mul-x0-x1",
-    label: "×0 & ×1",
-    description: "Identity",
+    label: "×0 and ×1",
+    description: "Times 0 is 0, times 1 is itself",
     members: (f) => SD_MUL(f) && (f.a <= 1 || f.b <= 1),
   },
   {
     id: "mul-x10",
     label: "×10",
-    description: "Tack on a zero",
+    description: "Add a zero on the end",
     members: (f) => SD_MUL(f) && (f.a === 10 || f.b === 10),
   },
   {
@@ -360,11 +360,50 @@ const DIVISION_STRANDS = [
   },
 ];
 
+// ---------- NUMBERS (Phase 3: concepts track) ----------
+// Numbers facts carry a `strandHint` set at build time (engine.js
+// buildNumbers) because there's no natural (a,b) → strand mapping
+// for things like "1/4 as a decimal". So each predicate just checks
+// the hint.
+const NUMBERS_STRANDS = [
+  {
+    id: "num-pct-of-100",
+    label: "Percent of 100",
+    description: "10% of 100, 25% of 100…",
+    members: (f) => f.strandHint === "num-pct-of-100",
+  },
+  {
+    id: "num-pct-common",
+    label: "Percent of common numbers",
+    description: "10%, 25%, 50%, 75% of 20-1000",
+    members: (f) => f.strandHint === "num-pct-common",
+  },
+  {
+    id: "num-frac-to-dec",
+    label: "Fraction → decimal",
+    description: "1/4 = 0.25, 1/2 = 0.5…",
+    members: (f) => f.strandHint === "num-frac-to-dec",
+  },
+  {
+    id: "num-pct-to-dec",
+    label: "Percent → decimal",
+    description: "50% = 0.5, 25% = 0.25…",
+    members: (f) => f.strandHint === "num-pct-to-dec",
+  },
+  {
+    id: "num-frac-to-pct",
+    label: "Fraction → percent",
+    description: "1/4 = 25%, 3/4 = 75%…",
+    members: (f) => f.strandHint === "num-frac-to-pct",
+  },
+];
+
 export const STRANDS_BY_OP = {
   addition: ADDITION_STRANDS,
   subtraction: SUBTRACTION_STRANDS,
   multiplication: MULTIPLICATION_STRANDS,
   division: DIVISION_STRANDS,
+  numbers: NUMBERS_STRANDS,
 };
 
 // First strand a fact belongs to (deterministic by ordering).

@@ -7,14 +7,28 @@ export const OPERATIONS = {
 };
 
 // Per-operation latency thresholds (ms).
-// Tuned from real session data — earlier values were too aggressive, almost
-// nothing classified as "fast" so no facts were reaching automatic.
+// Recalibrated 2026-05-18 from Isaac's real session data — old values
+// were physically unreachable for a 4th-grader typing answers on a
+// keyboard. Sample:
+//   addition p25 = 1179 ms (old fast was 1100 → 0 facts ever automatic)
+//   subtraction p25 = 1146 ms (old fast was 1100 → 0 facts ever automatic)
+//   multiplication p25 = 1520 ms (old fast was 1500 → just barely)
+// New `fast` lives at roughly the kid's p50 so a fluent fact CAN go
+// automatic. `slow` lives at roughly p75 so genuinely slow attempts
+// still get the "Correct, slow" coaching feedback.
 export const THRESHOLDS = {
-  addition:       { fast: 1100, slow: 2200 },
-  subtraction:    { fast: 1100, slow: 2200 },
-  multiplication: { fast: 1500, slow: 2800 },
-  division:       { fast: 1800, slow: 3200 },
+  addition:       { fast: 1500, slow: 2500 },
+  subtraction:    { fast: 1500, slow: 2500 },
+  multiplication: { fast: 2000, slow: 3200 },
+  division:       { fast: 2300, slow: 3800 },
 };
+
+// Max latency we ever store on a fact. Beyond this the student has
+// clearly walked away (we saw a 22-minute pause on Isaac's data
+// poison a single multiplication fact's avgLatency for life). Capping
+// it stops one walk-away from permanently barring a fact from
+// "automatic."
+export const LATENCY_CAP_MS = 8000;
 
 // Cold-start: small starter pool per op. Expansion handles the rest.
 export const STARTER_LEVELS = {
@@ -148,7 +162,20 @@ export function determineState(fact, op) {
   const acc = accuracyOf(fact);
   const fastT = THRESHOLDS[op].fast;
   if (acc < 0.75) return "learning";
-  if (fact.streakFastCorrect >= 3 && fact.avgLatency && fact.avgLatency <= fastT) return "automatic";
+  // `automatic` — uses LAST latency (not avg) so a fact can flip to
+  // automatic on the most recent fluent run, instead of forever being
+  // dragged down by early learning-phase attempts.
+  if (
+    fact.streakFastCorrect >= 3 &&
+    fact.lastLatency &&
+    fact.lastLatency <= fastT
+  ) return "automatic";
+  // `known` — new state introduced 2026-05-18. The kid knows the
+  // answer cold (≥4 reps at ≥85% accuracy) but isn't fast enough on a
+  // keyboard to clear the latency gate. Counts 0.75 toward mastery
+  // (vs accurate=0.5, automatic=1.0). Without this, slow-typing kids
+  // could never accumulate mastery score fast enough to expand.
+  if (fact.attempts >= 4 && acc >= 0.85) return "known";
   if (acc >= 0.85 && (fact.avgLatency || 9999) > fastT) return "accurate";
   return "effortful";
 }
@@ -181,6 +208,10 @@ function priorityFor(fact, op, today) {
   else if (fact.state === "effortful") p += 40;
   else if (fact.state === "accurate")  p += 35;
   else if (fact.state === "unknown")   p += 30;
+  // `known` lands between accurate and automatic — the kid clearly
+  // knows it, so it doesn't need as much practice as `accurate`, but
+  // we still want to revisit occasionally to nudge toward automatic.
+  else if (fact.state === "known")     p += 18;
   else if (fact.state === "automatic") p += 8;
 
   if (fact.streakWrong > 0) p += 25;
@@ -209,9 +240,11 @@ export function selectNextFact(facts, lastId, currentLevel, op) {
 }
 
 export function applyAttempt(fact, result, latency, op) {
+  // Cap stored latency so a walk-away doesn't poison the EMA forever.
+  const cappedLat = Math.min(latency, LATENCY_CAP_MS);
   const updated = { ...fact };
   updated.attempts += 1;
-  updated.lastLatency = latency;
+  updated.lastLatency = cappedLat;
   updated.lastSeenAt = Date.now();
   updated.lastSeenDay = todayKey();
 
@@ -219,8 +252,8 @@ export function applyAttempt(fact, result, latency, op) {
     updated.correct += 1;
     updated.streakWrong = 0;
     updated.avgLatency = updated.avgLatency
-      ? Math.round(updated.avgLatency * 0.7 + latency * 0.3)
-      : latency;
+      ? Math.round(updated.avgLatency * 0.7 + cappedLat * 0.3)
+      : cappedLat;
     updated.streakFastCorrect = result === "fast" ? updated.streakFastCorrect + 1 : 0;
   } else {
     updated.wrong += 1;
@@ -236,6 +269,7 @@ export function masteryScore(facts, currentLevel) {
   for (const f of Object.values(facts)) {
     if (f.difficulty > currentLevel || f.attempts === 0) continue;
     if (f.state === "automatic") score += 1;
+    else if (f.state === "known")    score += 0.75;
     else if (f.state === "accurate") score += 0.5;
   }
   return score;
@@ -243,11 +277,14 @@ export function masteryScore(facts, currentLevel) {
 
 export function shouldExpand(facts, currentLevel, op) {
   if (currentLevel >= MAX_LEVEL) return false;
-  // Threshold scales relative to this op's starter level:
-  // first unlock needs 4 mastery, second needs 8, third needs 12, etc.
+  // Threshold scales relative to this op's starter level. Lowered
+  // from *4 to *3 along with the new `known` state — combined effect
+  // is roughly that 4 well-known facts (vs 8 accurate-only) unlock
+  // the next tier on first expansion. Pace feels right for a kid
+  // who's actually engaging.
   const starter = STARTER_LEVELS[op] ?? 5;
   const tiersUnlocked = Math.max(1, currentLevel - starter + 1);
-  const threshold = tiersUnlocked * 4;
+  const threshold = tiersUnlocked * 3;
   return masteryScore(facts, currentLevel) >= threshold;
 }
 

@@ -4,6 +4,7 @@
 //   { progress: { addition, subtraction, multiplication, division }, history: { [day]: { totalActiveSec, sessions[] } } }
 
 import { supabase } from "./supabase";
+import { determineState, LATENCY_CAP_MS } from "./engine";
 
 const APP_SLUG = "math_facts";
 const HISTORY_DAYS = 30; // how many days of history to load up front
@@ -108,6 +109,14 @@ export async function loadStudentState(studentId) {
 
     const progress = accountRes.data?.state?.progress || defaultState().progress;
 
+    // Migration pass — re-evaluate every existing fact's state with
+    // the current engine logic. Without this, students who built
+    // progress under old thresholds (or before the new `known`
+    // state was introduced) keep stale `state` values until they
+    // happen to answer each fact again. Also caps over-stored
+    // latencies (old data may include 22-min walk-aways).
+    refreshFactStates(progress);
+
     const history = {};
     for (const s of sessionsRes.data || []) {
       const day = s.started_at.slice(0, 10);
@@ -137,6 +146,31 @@ export async function loadStudentState(studentId) {
     // eslint-disable-next-line no-console
     console.warn("Supabase load failed, using local cache:", e);
     return loadFromCache(studentId);
+  }
+}
+
+// Walk the loaded progress and re-classify every fact with the
+// current engine logic. Idempotent — safe to call on every load.
+// Also caps stored latencies so a pre-fix walk-away (e.g. 22-min
+// pause poisoning avgLatency) gets corrected.
+function refreshFactStates(progress) {
+  if (!progress) return;
+  for (const op of Object.keys(progress)) {
+    const facts = progress[op]?.facts;
+    if (!facts) continue;
+    for (const id of Object.keys(facts)) {
+      const f = facts[id];
+      if (!f) continue;
+      if (f.avgLatency && f.avgLatency > LATENCY_CAP_MS) {
+        f.avgLatency = LATENCY_CAP_MS;
+      }
+      if (f.lastLatency && f.lastLatency > LATENCY_CAP_MS) {
+        f.lastLatency = LATENCY_CAP_MS;
+      }
+      if (f.attempts > 0) {
+        f.state = determineState(f, op);
+      }
+    }
   }
 }
 

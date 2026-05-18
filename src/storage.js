@@ -164,8 +164,19 @@ export async function loadStudentState(studentId) {
 function refreshFactStates(progress) {
   if (!progress) return;
   for (const op of Object.keys(progress)) {
-    const facts = progress[op]?.facts;
-    if (!facts) continue;
+    // If the student has never started this op, progress[op] is
+    // `null` (initial defaultState shape). Initialize it now so the
+    // home screen's strand strip has something to show without
+    // needing a session start. STARTER_LEVELS used to live in
+    // engine.js — we don't import it here to avoid a circular dep,
+    // since defaultStarterLevel() inlines the same values.
+    if (!progress[op] || !progress[op].facts) {
+      progress[op] = {
+        facts: buildFacts(op),
+        currentLevel: defaultStarterLevel(op),
+      };
+    }
+    const facts = progress[op].facts;
 
     // 0. Merge in any new facts that aren't in the persisted dict
     //    (e.g., the 2-digit pools introduced in Phase 2). Existing
@@ -196,6 +207,13 @@ function refreshFactStates(progress) {
       f.strand = strandIdFor(op, f);
     }
   }
+}
+
+// Default starter level per op — mirrors STARTER_LEVELS in engine.js,
+// inlined to avoid an import cycle. Used only when initializing an
+// op that the student hasn't touched yet.
+function defaultStarterLevel(op) {
+  return { addition: 3, subtraction: 4, multiplication: 5, division: 5 }[op] || 5;
 }
 
 function cacheLocally(studentId, state) {

@@ -24,28 +24,33 @@
 // arrays at the bottom — the helpers do the rest.
 // ============================================================
 
-// Per-atom-type latency targets (ms). Phase 1 §1.2 specifies <1.0s
-// for GPC. We're slightly more lenient for first exposure and tighten
-// further for sight words (Ehri's orthographic mapping bound).
+// Per-atom-type latency targets (ms).
+// Recalibrated 2026-05-18 against Isaac's real session data — the
+// old values were physically unreachable for a kid tapping multiple-
+// choice answers on a phone/tablet (his typical letter-sound answer
+// ran ~3-6s; avg across the pool ~6500ms). Result: zero atoms ever
+// crossed the `mastered` gate, mastery distribution capped at 0.5.
+// Same diagnostic pattern as Math Facts Phase 1 (see
+// math_facts_curriculum memory).
 const TARGET_LATENCY = {
-  "letter-sound":  1500,
-  "digraph":       1800,
-  "blend":         2000,
-  "silent-e":      2000,
-  "vowel-team":    2000,
-  "r-controlled":  2000,
-  "soft":          2000,
-  "advanced":      2500,
-  "sight-word":     900,  // orthographic mapping: should feel automatic
-  "blending":      3000,  // multi-step: see graphemes → blend → recognize
-  "speak":         4000,  // includes record-then-recognize delay
+  "letter-sound":  3000,  // was 1500 — kid has to read the prompt + tap
+  "digraph":       3500,  // was 1800
+  "blend":         3800,  // was 2000
+  "silent-e":      3800,  // was 2000
+  "vowel-team":    3800,  // was 2000
+  "r-controlled":  3800,  // was 2000
+  "soft":          3800,  // was 2000
+  "advanced":      4200,  // was 2500
+  "sight-word":    2000,  // was 900 — sub-second was a misread of Ehri
+  "blending":      5000,  // was 3000 — genuinely multi-step
+  "speak":         5500,  // was 4000
   // Phonemic awareness (PA) atoms — pre-print, audio-first.
-  "pa-blend":      4000,  // hear separated phonemes → blend → say/pick word
-  "pa-initial":    3000,  // hear word → identify first sound
-  "pa-final":      3000,  // hear word → identify last sound
-  "pa-substitute": 5000,  // hear word + swap instruction → produce new word
-  "vocab-tier2":   4000,  // see word → pick definition
-  "picture-word":  3000,  // see picture (emoji) → say/pick the word
+  "pa-blend":      5500,  // was 4000
+  "pa-initial":    4500,  // was 3000
+  "pa-final":      4500,  // was 3000
+  "pa-substitute": 6500,  // was 5000
+  "vocab-tier2":   5500,  // was 4000
+  "picture-word":  4500,  // was 3000
 };
 
 // Pick `n` random items from `arr`, excluding any in `exclude` set.

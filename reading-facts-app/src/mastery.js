@@ -20,11 +20,29 @@ let currentStudentId = null;
 
 // EMA factors for updating the mastery score.
 const MASTERED_BUMP = 0.40; // correct + fast → strong move toward 1
-const ACCURATE_BUMP = 0.15; // correct, slow → small move toward 1
+const KNOWN_BUMP    = 0.28; // correct + slow + high prior accuracy → mid move
+const ACCURATE_BUMP = 0.15; // correct + slow + learning phase → small move
 const WRONG_DECAY   = 0.50; // incorrect → halve
 
 // A score this high counts the atom as "mastered" for aggregate stats.
 const MASTERY_THRESHOLD = 0.7;
+
+// Latency cap (ms). Diagnosed in Math Facts Phase 1: walk-aways
+// poisoned avg_latency forever (saw a 22-min pause). Cap stored
+// values so a single bathroom break can't permanently bar an atom
+// from mastery.
+const LATENCY_CAP_MS = 8000;
+
+// "Known" bump-eligibility: an atom counts as "known" — i.e. the
+// kid demonstrably knows the answer, just doesn't tap quickly —
+// when they have ≥ 3 attempts at ≥ 85% accuracy. Below either
+// threshold, correct-slow attempts use the smaller ACCURATE_BUMP
+// (learning-phase pace).
+function isInKnownPhase(row) {
+  if (!row || row.attempts < 3) return false;
+  const acc = row.correct / row.attempts;
+  return acc >= 0.85;
+}
 
 // Load all mastery rows for one student into the in-memory cache.
 // Call this once when the student is selected (in routeAfterAuth /
@@ -49,6 +67,22 @@ export async function loadMastery(studentId) {
 
   for (const row of data || []) {
     cache.set(row.atom_id, row);
+  }
+  // One-time legacy-data hygiene: cap any historical over-cap
+  // latencies so future avg calculations don't drag the kid down.
+  // Doesn't write back — the next recordAttempt naturally persists
+  // corrected values; this just keeps the in-memory cache honest.
+  capLatenciesInCache();
+}
+
+function capLatenciesInCache() {
+  for (const row of cache.values()) {
+    if (row.avg_latency_ms && row.avg_latency_ms > LATENCY_CAP_MS) {
+      row.avg_latency_ms = LATENCY_CAP_MS;
+    }
+    if (row.last_latency_ms && row.last_latency_ms > LATENCY_CAP_MS) {
+      row.last_latency_ms = LATENCY_CAP_MS;
+    }
   }
 }
 
@@ -92,12 +126,18 @@ export async function recordAttempt(atomId, verdict, latencyMs) {
     mastery_score: 0,
   };
 
+  // Cap stored latency so a walk-away (e.g. 22-min pause) doesn't
+  // poison avg_latency_ms permanently. The classifyAnswer caller
+  // already saw the real latency for its verdict; we only cap what
+  // we persist.
+  const cappedLat = Math.min(latencyMs, LATENCY_CAP_MS);
+
   const next = { ...existing };
   next.attempts        = (existing.attempts || 0) + 1;
-  next.last_latency_ms = latencyMs;
+  next.last_latency_ms = cappedLat;
   next.last_attempt_at = new Date().toISOString();
   next.avg_latency_ms  = Math.round(
-    ((existing.avg_latency_ms || 0) * (existing.attempts || 0) + latencyMs) /
+    ((existing.avg_latency_ms || 0) * (existing.attempts || 0) + cappedLat) /
     next.attempts
   );
 
@@ -108,8 +148,13 @@ export async function recordAttempt(atomId, verdict, latencyMs) {
       existing.mastery_score + (1 - existing.mastery_score) * MASTERED_BUMP;
   } else if (verdict === "accurate") {
     next.correct = (existing.correct || 0) + 1;
+    // Pick the bump based on prior phase. A kid in the "known" phase
+    // (≥3 attempts at ≥85% acc) gets a meaningful move toward mastery
+    // even when slow — they know it cold, the keyboard/screen is just
+    // a tax. Kids still learning get the smaller bump.
+    const bump = isInKnownPhase(existing) ? KNOWN_BUMP : ACCURATE_BUMP;
     next.mastery_score =
-      existing.mastery_score + (1 - existing.mastery_score) * ACCURATE_BUMP;
+      existing.mastery_score + (1 - existing.mastery_score) * bump;
   } else {
     next.mastery_score = existing.mastery_score * WRONG_DECAY;
   }

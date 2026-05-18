@@ -161,22 +161,25 @@ export function determineState(fact, op) {
   if (fact.attempts < 3) return "unknown";
   const acc = accuracyOf(fact);
   const fastT = THRESHOLDS[op].fast;
+  // Clean four-rung ladder: learning < effortful < known < automatic.
+  // (`accurate` is kept in masteryScore for backward compat with
+  // pre-2026-05-18 persisted data, but new evaluations never produce
+  // it — it was an artifact of latency-gated state classification
+  // that left fast-typing kids stuck at `effortful` despite high
+  // accuracy.)
   if (acc < 0.75) return "learning";
-  // `automatic` — uses LAST latency (not avg) so a fact can flip to
-  // automatic on the most recent fluent run, instead of forever being
-  // dragged down by early learning-phase attempts.
+  // automatic — fast + reliable. lastLatency (not avgLatency) so a
+  // recent fluent run can flip the fact even if early reps were slow.
   if (
     fact.streakFastCorrect >= 3 &&
     fact.lastLatency &&
     fact.lastLatency <= fastT
   ) return "automatic";
-  // `known` — new state introduced 2026-05-18. The kid knows the
-  // answer cold (≥4 reps at ≥85% accuracy) but isn't fast enough on a
-  // keyboard to clear the latency gate. Counts 0.75 toward mastery
-  // (vs accurate=0.5, automatic=1.0). Without this, slow-typing kids
-  // could never accumulate mastery score fast enough to expand.
-  if (fact.attempts >= 4 && acc >= 0.85) return "known";
-  if (acc >= 0.85 && (fact.avgLatency || 9999) > fastT) return "accurate";
+  // known — high accuracy, time-agnostic. Catches both fast-typers
+  // who can't quite clear fastT and slow-typers who know it cold.
+  // Counts 0.75 toward expansion (vs accurate=0.5, automatic=1.0).
+  if (acc >= 0.85) return "known";
+  // effortful — getting it sometimes, still making mistakes.
   return "effortful";
 }
 

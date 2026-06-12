@@ -101,7 +101,7 @@ function LoadingCard({ label = "Loading…" }) {
 // ============================================================
 function MathFactsApp({ student, onSignOut, onSwitchStudent }) {
   const [persisted, setPersisted] = useState(null);
-  const [screen, setScreen] = useState("home"); // home | session | summary
+  const [screen, setScreen] = useState("home"); // home | prestart | probe | session | summary
   const [activeOp, setActiveOp] = useState(null);
   const [lastSummary, setLastSummary] = useState(null);
 
@@ -119,7 +119,13 @@ function MathFactsApp({ student, onSignOut, onSwitchStudent }) {
 
   function startSession(op) {
     setActiveOp(op);
-    setScreen("session");
+    // Fresh op (zero attempts anywhere) → offer the Fast Start
+    // placement probe before dropping the student at strand 1.
+    if (engine.isFreshOp(persisted, op)) {
+      setScreen("prestart");
+    } else {
+      setScreen("session");
+    }
   }
 
   function finishSession(summary, factsAfter, levelAfter) {
@@ -142,6 +148,23 @@ function MathFactsApp({ student, onSignOut, onSwitchStudent }) {
   }
 
   if (!persisted) return <LoadingCard label="Loading your progress…" />;
+
+  if (screen === "prestart") {
+    return (
+      <FastStartChoice
+        op={activeOp}
+        onProbe={() => setScreen("probe")}
+        onScratch={() => setScreen("session")}
+        onBack={backToHome}
+      />
+    );
+  }
+
+  if (screen === "probe") {
+    return (
+      <ProbeSession op={activeOp} persisted={persisted} onComplete={finishSession} />
+    );
+  }
 
   if (screen === "session") {
     return (
@@ -355,6 +378,208 @@ function Home({ persisted, student, onStart, onSignOut, onSwitchStudent }) {
             );
           })}
         </div>
+      </div>
+    </main>
+  );
+}
+
+// ============================================================
+// FAST START — choice screen + placement probe (2026-06-12)
+// ============================================================
+function FastStartChoice({ op, onProbe, onScratch, onBack }) {
+  const operation = engine.OPERATIONS[op];
+  return (
+    <main className="app">
+      <div className="card session-card">
+        <div className="session-header">
+          <button className="back-btn" onClick={onBack} aria-label="Back">
+            ←
+          </button>
+          <span className="op-name">{operation.label}</span>
+          <span className="meta" />
+        </div>
+        <div className="warm-greeting">Already know some {operation.label.toLowerCase()}?</div>
+        <p className="summary-line" style={{ margin: "12px 0 24px" }}>
+          Take a 2-minute Fast Start check. Anything you can already answer
+          quickly gets skipped, so you start right at your level.
+        </p>
+        <div className="summary-actions">
+          <button className="primary-btn" onClick={onProbe}>
+            Fast Start check
+          </button>
+          <button className="secondary-btn" onClick={onScratch}>
+            Start from the beginning
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+// Probe loop: 2 facts per strand, in unlock order. A strand passes if
+// every probed fact is correct within the op's `slow` threshold. The
+// first miss (or slow answer) ends the probe — that's the placement
+// point. Passed strands get seeded as `known` via applyProbeResults.
+function ProbeSession({ op, persisted, onComplete }) {
+  const operation = engine.OPERATIONS[op];
+  const startProg = persisted.progress[op] || engine.initialProgress(op);
+
+  const planRef = useRef(null);
+  if (!planRef.current) planRef.current = engine.buildProbePlan(startProg.facts, op);
+  const plan = planRef.current;
+
+  const [strandIdx, setStrandIdx] = useState(0);
+  const [factIdx, setFactIdx] = useState(0);
+  const [input, setInput] = useState("");
+  const [elapsed, setElapsed] = useState(0);
+  const [done, setDone] = useState(false);
+
+  const statsRef = useRef({
+    attempts: 0,
+    correct: 0,
+    fastCount: 0,
+    latencies: [],
+    activeSec: 0,
+    passed: [], // strand ids that fully passed
+  });
+  const startRef = useRef(Date.now());
+  const inputRef = useRef(null);
+
+  const strand = plan[strandIdx];
+  const fact = strand?.facts[factIdx];
+
+  useEffect(() => {
+    startRef.current = Date.now();
+    if (inputRef.current) inputRef.current.focus();
+  }, [strandIdx, factIdx]);
+
+  useEffect(() => {
+    if (done) return;
+    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [done]);
+
+  // Time cap — score what we have
+  useEffect(() => {
+    if (!done && elapsed >= engine.PROBE_TIME_CAP) finishProbe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elapsed]);
+
+  function finishProbe() {
+    if (done) return;
+    setDone(true);
+    const s = statsRef.current;
+    const today = undefined; // engine defaults to today
+    const newFacts = engine.applyProbeResults(startProg.facts, s.passed, today);
+    const avgLatency =
+      s.latencies.length > 0
+        ? Math.round(s.latencies.reduce((a, x) => a + x, 0) / s.latencies.length)
+        : 0;
+    const placed = engine.activeStrandId(newFacts, op);
+    const placedDef = placed ? engine.strandById?.(placed) : null;
+    onComplete(
+      {
+        op,
+        activeSec: s.activeSec,
+        durationSec: elapsed,
+        attempts: s.attempts,
+        correct: s.correct,
+        fastCount: s.fastCount,
+        avgLatencyMs: avgLatency,
+        accuracy: s.attempts > 0 ? s.correct / s.attempts : 0,
+        speed: s.correct > 0 ? s.fastCount / s.correct : 0,
+        xp: engine.xpFromActiveSec(s.activeSec),
+        newlyAutomaticIds: [],
+        newlyAutomaticCount: 0,
+        probe: true,
+        passedStrandCount: s.passed.length,
+        placedStrandLabel: placedDef?.label || null,
+      },
+      newFacts,
+      startProg.currentLevel,
+    );
+  }
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (input === "" || done || !fact) return;
+
+    const latency = Date.now() - startRef.current;
+    const numInput = Number(input);
+    const correctAns =
+      Number.isFinite(numInput) && Math.abs(numInput - fact.answer) < 0.001;
+    const withinSlow = latency <= engine.THRESHOLDS[op].slow;
+    const pass = correctAns && withinSlow;
+
+    const s = statsRef.current;
+    s.attempts += 1;
+    if (correctAns) {
+      s.correct += 1;
+      s.latencies.push(latency);
+      if (latency <= engine.THRESHOLDS[op].fast) s.fastCount += 1;
+    }
+    s.activeSec += Math.min(latency / 1000, engine.PROBLEM_TIME_CAP);
+    setInput("");
+
+    if (!pass) {
+      // Placement found — this strand is the student's frontier.
+      finishProbe();
+      return;
+    }
+
+    if (factIdx + 1 < strand.facts.length) {
+      setFactIdx(factIdx + 1);
+      return;
+    }
+
+    // Strand fully passed
+    s.passed.push(strand.strandId);
+    if (strandIdx + 1 < plan.length) {
+      setStrandIdx(strandIdx + 1);
+      setFactIdx(0);
+    } else {
+      finishProbe();
+    }
+  }
+
+  if (!fact) return null;
+
+  return (
+    <main className="app">
+      <div className="card session-card">
+        <div className="session-header">
+          <button
+            className="back-btn"
+            onClick={finishProbe}
+            aria-label="End check"
+          >
+            ←
+          </button>
+          <span className="op-name">Fast Start · {operation.label}</span>
+          <span className="meta meta-time">{engine.fmtTime(elapsed)}</span>
+        </div>
+
+        <div className="eyebrow" style={{ textAlign: "center", marginTop: 8 }}>
+          Checkpoint {strandIdx + 1} of {plan.length}
+        </div>
+
+        <h1 className="problem">
+          {fact.displayText || `${fact.a} ${operation.symbol} ${fact.b}`}
+        </h1>
+
+        <form onSubmit={handleSubmit}>
+          <input
+            ref={inputRef}
+            autoFocus
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            inputMode={op === "numbers" ? "decimal" : "numeric"}
+            className="answer-input"
+            disabled={done}
+          />
+        </form>
+
+        <div className="feedback"> </div>
       </div>
     </main>
   );
@@ -809,8 +1034,17 @@ function Summary({ summary, persisted, onContinue, onDone }) {
         </div>
 
         <div className="summary-line">
+          {summary.probe ? "Fast Start · " : ""}
           {operation.label} · {engine.fmtTime(summary.durationSec)}
         </div>
+
+        {summary.probe && (
+          <div className="comparison comparison-good">
+            {summary.passedStrandCount > 0
+              ? `Skipped ${summary.passedStrandCount} strand${summary.passedStrandCount === 1 ? "" : "s"} you already know${summary.placedStrandLabel ? ` — starting at ${summary.placedStrandLabel}` : ""}`
+              : "Starting from the beginning — perfect place to build"}
+          </div>
+        )}
 
         {comparison && (
           <div className={`comparison comparison-${comparison.kind}`}>

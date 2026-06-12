@@ -22,7 +22,39 @@ export const STRAND_COMPLETE_RATIO = 0.75;
 
 // How often selectNextFact pulls a retention rep from a previously-
 // completed strand instead of the active strand. Spaced retention.
+// (Legacy constant — since the 2026-06-12 SRS scheduler, retention
+// pulls come from the due-queue instead; kept for back-compat.)
 export const RETENTION_RATE = 0.18;
+
+// ---------- SPACED-REPETITION SCHEDULER (2026-06-12) ----------
+// Expanding-interval review for facts the student knows. Each
+// `known`/`automatic` fact carries:
+//   srsInterval — current review interval in days (0 = unscheduled)
+//   dueDay      — YYYY-MM-DD the fact is next due for a retention rep
+// A successful retrieval ON OR AFTER the due day expands the interval
+// (1 → 2 → 4 → 8 → 16 → 32). A wrong answer resets it to due-now.
+// Reviewing early (before due) does NOT expand — massed reps don't
+// strengthen long-term retention (spacing effect: Cepeda et al. 2006).
+export const SRS_INTERVALS = [1, 2, 4, 8, 16, 32];
+
+export function nextSrsInterval(cur) {
+  for (const i of SRS_INTERVALS) if (i > (cur || 0)) return i;
+  return SRS_INTERVALS[SRS_INTERVALS.length - 1];
+}
+
+export function addDaysToKey(dayKey, n) {
+  const d = new Date(dayKey + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// Probability of pulling from the due-queue instead of the active
+// strand. Scales with how much is due — a big backlog gets cleared
+// faster — capped so new learning never stalls.
+export function dueQueueRate(dueCount) {
+  if (dueCount <= 0) return 0;
+  return Math.min(0.5, 0.12 + dueCount * 0.03);
+}
 
 // Per-operation latency thresholds (ms).
 // Recalibrated 2026-05-18 from Isaac's real session data — old values
@@ -92,6 +124,8 @@ function emptyTracking() {
     lastSeenDay: null, // YYYY-MM-DD — for spaced-repetition decay
     streakFastCorrect: 0, streakWrong: 0,
     state: "unknown", // unknown | learning | accurate | effortful | automatic
+    srsInterval: 0,   // days; 0 = not yet scheduled
+    dueDay: null,     // YYYY-MM-DD next retention rep
   };
 }
 
@@ -325,17 +359,31 @@ function recencyBoost(lastSeenAt) {
   return 20;
 }
 
-// Spaced-repetition decay for mastered facts.
-// Mastered facts that haven't been seen in days bubble back up for retention reps.
+// Spaced-repetition boost — due-date based (2026-06-12).
+// Facts past their dueDay bubble up with urgency proportional to how
+// overdue they are; facts not yet due are actively deprioritized so
+// the engine doesn't waste reps on cramming. Includes `known` facts
+// (the old decayBoost skipped them — a retention hole, since most of
+// a slow-typing kid's mastered facts live at `known`).
 function decayBoost(fact, today) {
-  if (!fact.lastSeenDay) return 0;
-  if (fact.state !== "automatic" && fact.state !== "accurate") return 0;
-  const days = daysBetween(fact.lastSeenDay, today);
-  if (days <= 0) return 0;
-  if (days === 1) return 12;   // next-day check
-  if (days <= 3)  return 25;   // 2–3 days
-  if (days <= 7)  return 45;   // within a week
-  return 65;                   // ≥ 1 week — urgent retention
+  const retained =
+    fact.state === "automatic" || fact.state === "known" || fact.state === "accurate";
+  if (!retained) return 0;
+  if (!fact.dueDay) {
+    // Un-scheduled legacy fact — fall back to lastSeenDay age.
+    if (!fact.lastSeenDay) return 0;
+    const days = daysBetween(fact.lastSeenDay, today);
+    if (days <= 0) return 0;
+    if (days <= 3) return 25;
+    if (days <= 7) return 45;
+    return 65;
+  }
+  const overdue = daysBetween(fact.dueDay, today); // >0 means past due
+  if (overdue < 0)  return -15;  // not due yet — let it rest
+  if (overdue === 0) return 18;  // due today
+  if (overdue <= 3) return 35;
+  if (overdue <= 7) return 50;
+  return 65;                     // long overdue — urgent
 }
 
 function priorityFor(fact, op, today) {
@@ -423,29 +471,52 @@ export function activeStrandId(facts, op) {
 
 // ============================================================
 
-// Pick the next fact to drill. Strand-aware:
-//   - With probability RETENTION_RATE, pull from a previously-
-//     completed strand (spaced retention). Only if such strands exist.
+// Weighted pick among the 5 highest-priority facts in a pool.
+function weightedPick(pool, op, today) {
+  const scored = pool.map((f) => ({ fact: f, p: priorityFor(f, op, today) }));
+  scored.sort((a, b) => b.p - a.p);
+  const top = scored.slice(0, 5);
+  const totalP = top.reduce((s, x) => s + Math.max(x.p, 1), 0);
+  let r = Math.random() * totalP;
+  for (const item of top) {
+    r -= Math.max(item.p, 1);
+    if (r <= 0) return item.fact;
+  }
+  return top[0].fact;
+}
+
+// All facts currently due for a retention rep (SRS due-queue).
+export function dueFacts(facts, today = todayKey()) {
+  return Object.values(facts).filter(
+    (f) =>
+      (f.state === "known" || f.state === "automatic" || f.state === "accurate") &&
+      f.dueDay &&
+      f.dueDay <= today,
+  );
+}
+
+// Pick the next fact to drill. SRS- and strand-aware:
+//   - With probability dueQueueRate(n), pull the highest-priority
+//     fact from the due-queue (spaced retention across ALL strands,
+//     replacing the old random completed-strand sprinkle).
 //   - Otherwise pull from the active strand.
-//   - Within the chosen pool, use the existing priority logic +
-//     5-fact weighted random pick.
+//   - Within the chosen pool, priority logic + 5-fact weighted pick.
 //
 // `op` is required; `currentLevel` no longer used and accepted as
 // undefined for backward compat from any caller still passing it.
 export function selectNextFact(facts, lastId, op) {
   const today = todayKey();
+
+  // SRS due-queue first.
+  const due = dueFacts(facts, today).filter((f) => f.id !== lastId);
+  if (due.length > 0 && Math.random() < dueQueueRate(due.length)) {
+    return weightedPick(due, op, today);
+  }
+
   const statuses = strandStatuses(facts, op);
   const activeId = statuses.find((s) => s.status === "active")?.id || null;
   const completeIds = statuses.filter((s) => s.status === "complete").map((s) => s.id);
-
-  // Decide which strand pool to draw from.
-  let strandPool;
-  if (completeIds.length > 0 && Math.random() < RETENTION_RATE) {
-    const retentionId = completeIds[Math.floor(Math.random() * completeIds.length)];
-    strandPool = retentionId;
-  } else {
-    strandPool = activeId || completeIds[completeIds.length - 1] || null;
-  }
+  const strandPool = activeId || completeIds[completeIds.length - 1] || null;
 
   let pool;
   if (strandPool) {
@@ -459,16 +530,7 @@ export function selectNextFact(facts, lastId, op) {
     return Object.values(facts).filter((f) => f.id !== lastId)[0]
         || Object.values(facts)[0];
   }
-  const scored = pool.map((f) => ({ fact: f, p: priorityFor(f, op, today) }));
-  scored.sort((a, b) => b.p - a.p);
-  const top = scored.slice(0, 5);
-  const totalP = top.reduce((s, x) => s + Math.max(x.p, 1), 0);
-  let r = Math.random() * totalP;
-  for (const item of top) {
-    r -= Math.max(item.p, 1);
-    if (r <= 0) return item.fact;
-  }
-  return top[0].fact;
+  return weightedPick(pool, op, today);
 }
 
 export function applyAttempt(fact, result, latency, op) {
@@ -493,6 +555,22 @@ export function applyAttempt(fact, result, latency, op) {
     updated.streakFastCorrect = 0;
   }
   updated.state = determineState(updated, op);
+
+  // ---- SRS scheduling ----
+  const today = todayKey();
+  if (result === "wrong") {
+    // Missed — back to the front of the queue.
+    updated.srsInterval = 0;
+    updated.dueDay = today;
+  } else if (updated.state === "known" || updated.state === "automatic") {
+    const wasDue = !updated.dueDay || updated.dueDay <= today;
+    if (wasDue) {
+      updated.srsInterval = nextSrsInterval(updated.srsInterval);
+      updated.dueDay = addDaysToKey(today, updated.srsInterval);
+    }
+    // Early (pre-due) correct reps don't expand the interval —
+    // spacing, not massing, is what builds retention.
+  }
   return updated;
 }
 
@@ -700,6 +778,66 @@ function subHint({ a, b, answer }) {
     strategy: `Count up from ${b}`,
     steps: [`${b} → ${a}`, `Distance: ${answer}`],
   };
+}
+
+// ---------- FAST START PLACEMENT PROBE (2026-06-12) ----------
+// A ~2-minute diagnostic for students starting an op they may already
+// partially know. Samples a few facts per strand in unlock order; a
+// strand "passes" if every probed fact is answered correctly within
+// the op's `slow` threshold. The probe stops at the first failed
+// strand (that's the placement point). All facts in passed strands
+// are seeded as `known` with an SRS due date, so the strand system
+// jumps the student straight to their actual frontier instead of
+// grinding 3+2 for weeks. Seeded facts still have to EARN `automatic`
+// through real timed reps — the probe only skips re-learning.
+export const PROBE_FACTS_PER_STRAND = 2;
+export const PROBE_MAX_STRANDS = 12;
+export const PROBE_TIME_CAP = 3 * 60; // seconds
+
+export function isFreshOp(persisted, op) {
+  const prog = persisted.progress?.[op];
+  if (!prog || !prog.facts) return true;
+  return !Object.values(prog.facts).some((f) => f.attempts > 0);
+}
+
+// Ordered probe plan: [{ strandId, label, facts: [fact, ...] }]
+export function buildProbePlan(facts, op) {
+  const strands = STRANDS_BY_OP[op] || [];
+  const plan = [];
+  for (const s of strands.slice(0, PROBE_MAX_STRANDS)) {
+    const members = Object.values(facts).filter((f) => f.strand === s.id);
+    if (members.length === 0) continue;
+    const shuffled = [...members].sort(() => Math.random() - 0.5);
+    plan.push({
+      strandId: s.id,
+      label: s.label,
+      facts: shuffled.slice(0, PROBE_FACTS_PER_STRAND),
+    });
+  }
+  return plan;
+}
+
+// Seed every untouched fact in the passed strands as `known`.
+// attempts=4/correct=4 makes determineState() stable across future
+// refreshFactStates migrations (acc=1.0, attempts≥3 → known).
+export function applyProbeResults(facts, passedStrandIds, today = todayKey()) {
+  const passed = new Set(passedStrandIds);
+  const out = { ...facts };
+  for (const f of Object.values(out)) {
+    if (!passed.has(f.strand)) continue;
+    if (f.attempts > 0) continue; // real history wins over inference
+    out[f.id] = {
+      ...f,
+      attempts: 4,
+      correct: 4,
+      wrong: 0,
+      state: "known",
+      lastSeenDay: today,
+      srsInterval: 2,
+      dueDay: addDaysToKey(today, 2),
+    };
+  }
+  return out;
 }
 
 // ---------- CROSS-OP PREREQUISITES ----------

@@ -4,7 +4,7 @@
 //   { progress: { addition, subtraction, multiplication, division }, history: { [day]: { totalActiveSec, sessions[] } } }
 
 import { supabase } from "./supabase";
-import { determineState, LATENCY_CAP_MS, buildFacts } from "./engine";
+import { determineState, LATENCY_CAP_MS, buildFacts, addDaysToKey } from "./engine";
 import { strandIdFor } from "./curriculum";
 
 const APP_SLUG = "math_facts";
@@ -26,18 +26,44 @@ export function getTodayHistory(state) {
   return state.history[todayKey()] || { totalActiveSec: 0, sessions: [] };
 }
 
+// Day streak with protection (2026-06-12):
+//   - Today not yet practiced doesn't zero the streak (it just
+//     doesn't count yet) — the old version showed 0 every morning.
+//   - Weekends are exempt: practicing Sat/Sun extends the streak,
+//     skipping them never breaks it.
+//   - One automatic "freeze": a single missed weekday is forgiven,
+//     as long as no other miss was forgiven within the prior 7 days.
+// Why: streaks motivate through loss aversion, but a streak that dies
+// to one sick day teaches kids to stop caring about it entirely.
 export function dayStreak(state) {
+  const activeOn = (d) => {
+    const day = state.history[todayKey(d)];
+    return !!(day && day.totalActiveSec > 0);
+  };
+  const dayDiff = (k1, k2) =>
+    Math.round((new Date(k2 + "T00:00:00Z") - new Date(k1 + "T00:00:00Z")) / 86400000);
+
   let streak = 0;
   const d = new Date();
-  while (true) {
+  if (!activeOn(d)) d.setDate(d.getDate() - 1); // today pending, not a miss
+
+  const forgiven = [];
+  for (let guard = 0; guard < 1000; guard++) {
     const key = todayKey(d);
-    const day = state.history[key];
-    if (day && day.totalActiveSec > 0) {
+    const dow = d.getDay(); // 0 = Sun, 6 = Sat
+    if (activeOn(d)) {
       streak += 1;
-      d.setDate(d.getDate() - 1);
+    } else if (dow === 0 || dow === 6) {
+      // weekend pause — neither counts nor breaks
     } else {
-      break;
+      // weekday miss — forgive once per rolling 7 days, and only if
+      // there's an actual streak behind it to protect
+      const freezeAvailable =
+        streak > 0 && !forgiven.some((fk) => Math.abs(dayDiff(key, fk)) < 7);
+      if (!freezeAvailable) break;
+      forgiven.push(key);
     }
+    d.setDate(d.getDate() - 1);
   }
   return streak;
 }
@@ -205,6 +231,19 @@ function refreshFactStates(progress) {
       }
       // Tag (or re-tag) the strand. Cheap — pure function over (op, a, b).
       f.strand = strandIdFor(op, f);
+
+      // 4. SRS seeding (2026-06-12) — facts persisted before the
+      //    scheduler existed get an interval/due-day inferred from
+      //    their state + last-seen day. One-time, idempotent.
+      if (f.srsInterval === undefined || f.srsInterval === null) {
+        if (f.state === "automatic") f.srsInterval = 4;
+        else if (f.state === "known" || f.state === "accurate") f.srsInterval = 2;
+        else f.srsInterval = 0;
+        f.dueDay =
+          f.srsInterval > 0
+            ? addDaysToKey(f.lastSeenDay || todayKey(), f.srsInterval)
+            : null;
+      }
     }
   }
 }

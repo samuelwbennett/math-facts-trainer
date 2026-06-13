@@ -752,8 +752,22 @@ function Session({ op, persisted, onComplete }) {
     const activeAdd = Math.min(latency / 1000, engine.PROBLEM_TIME_CAP);
     const newActive = activeSec + activeAdd;
 
-    const updated = engine.applyAttempt(fact, result, latency, op, thr);
+    // Only symbolic (a OP b) misses feed the confusion-pair coach — a
+    // typed wrong value maps cleanly to "the answer of some other fact"
+    // only in that form, not for missing-operand or numbers prompts.
+    const isSymbolic =
+      !fact.displayText &&
+      fact.presentation !== "missing-a" &&
+      fact.presentation !== "missing-b";
+    const typedWrong =
+      !correctAns && isSymbolic && Number.isFinite(numInput) ? numInput : undefined;
+
+    const updated = engine.applyAttempt(fact, result, latency, op, thr, typedWrong);
     const newFacts = { ...facts, [updated.id]: updated };
+
+    // Systematic confusion on this fact? (recurring wrong value)
+    const confusion =
+      result === "wrong" ? engine.detectConfusion(updated, newFacts) : null;
 
     const newAttempts = attempts + 1;
     const newCorrect  = correct + (correctAns ? 1 : 0);
@@ -765,12 +779,17 @@ function Session({ op, persisted, onComplete }) {
     setFastCount(newFast);
     if (correctAns) setLatencies((arr) => [...arr, latency]);
 
-    // Hint escalation: second consecutive miss on the same fact triggers a strategy hint,
-    // and the SAME fact is re-shown so the student can apply it.
+    // Hint escalation. A detected confusion fires a contrast hint on
+    // the FIRST miss it's seen on (the wrong value already recurred
+    // ≥2× across attempts, so no need to wait for a fresh streak).
+    // Otherwise the generic strategy hint fires on the 2nd consecutive
+    // miss. Either way the SAME fact is re-shown so the student applies
+    // the coaching.
+    const triggerConfusionHint = !!confusion && !hintedRef.current.has(updated.id);
     const triggerHint =
       result === "wrong" &&
-      updated.streakWrong >= 2 &&
-      !hintedRef.current.has(updated.id);
+      (triggerConfusionHint ||
+        (updated.streakWrong >= 2 && !hintedRef.current.has(updated.id)));
 
     // Feedback
     if (result === "fast") {
@@ -783,7 +802,11 @@ function Session({ op, persisted, onComplete }) {
       setFeedback(engine.inFluencyMode(fact) ? "Too slow" : "Correct");
       setFeedbackKind(engine.inFluencyMode(fact) ? "ok" : "good");
     } else if (triggerHint) {
-      setCurrentHint(engine.hintFor(updated));
+      setCurrentHint(
+        triggerConfusionHint
+          ? engine.confusionHintFor(updated, confusion, op)
+          : engine.hintFor(updated),
+      );
       setFeedback("");
       setFeedbackKind("");
       hintedRef.current.add(updated.id);
@@ -842,7 +865,18 @@ function Session({ op, persisted, onComplete }) {
       return;
     }
 
-    const next = engine.selectNextFact(newFacts, updated.id, op, thr);
+    // Interleave the confusion partner: right after missing 7×8 (which
+    // the student keeps answering as 54), surface 6×9 so they have to
+    // discriminate the two under time. Falls back to normal selection.
+    const partnerId =
+      result === "wrong" ? engine.confusionPartnerId(updated, newFacts) : null;
+    const next =
+      partnerId &&
+      newFacts[partnerId] &&
+      partnerId !== updated.id &&
+      Math.random() < engine.CONFUSION_PARTNER_RATE
+        ? newFacts[partnerId]
+        : engine.selectNextFact(newFacts, updated.id, op, thr);
     setCurrentId(next.id);
     setCurrentPresentation(pickPresentation(newFacts[next.id]));
     setInput("");

@@ -288,6 +288,11 @@ function refreshFactStates(progress, calibration) {
       // Tag (or re-tag) the strand. Cheap — pure function over (op, a, b).
       f.strand = strandIdFor(op, f);
 
+      // Confusion-pair coach (2026-06-13): facts persisted before this
+      // shipped have no wrongAnswers tally. Default it so the coach's
+      // reads never hit undefined.
+      if (!f.wrongAnswers) f.wrongAnswers = {};
+
       // 4. SRS seeding (2026-06-12) — facts persisted before the
       //    scheduler existed get an interval/due-day inferred from
       //    their state + last-seen day. One-time, idempotent.

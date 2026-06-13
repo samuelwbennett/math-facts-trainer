@@ -226,6 +226,12 @@ function emptyTracking() {
     state: "unknown", // unknown | learning | accurate | effortful | automatic
     srsInterval: 0,   // days; 0 = not yet scheduled
     dueDay: null,     // YYYY-MM-DD next retention rep
+    // Confusion-pair coach (2026-06-13): tally of the WRONG numeric
+    // values the student has typed for this fact, e.g. {"54": 3}. A
+    // value that recurs reveals a systematic confusion (not a slip);
+    // mapping it back to the fact whose answer equals it names the
+    // confused pair. Only symbolic-presentation misses are tallied.
+    wrongAnswers: {},
   };
 }
 
@@ -656,10 +662,16 @@ export function selectNextFact(facts, lastId, op, thr = THRESHOLDS[op]) {
   return weightedPick(pool, op, today, thr);
 }
 
-export function applyAttempt(fact, result, latency, op, thr = THRESHOLDS[op]) {
+// `typedWrong` (optional) is the numeric value the student entered on
+// a wrong symbolic attempt — recorded into wrongAnswers to power the
+// confusion-pair coach. Omit it (undefined) for missing-operand or
+// numbers presentations where a typed wrong value doesn't map cleanly
+// to "the answer of some other fact."
+export function applyAttempt(fact, result, latency, op, thr = THRESHOLDS[op], typedWrong) {
   // Cap stored latency so a walk-away doesn't poison the EMA forever.
   const cappedLat = Math.min(latency, LATENCY_CAP_MS);
   const updated = { ...fact };
+  updated.wrongAnswers = { ...(fact.wrongAnswers || {}) };
   updated.attempts += 1;
   updated.lastLatency = cappedLat;
   updated.lastSeenAt = Date.now();
@@ -676,6 +688,18 @@ export function applyAttempt(fact, result, latency, op, thr = THRESHOLDS[op]) {
     updated.wrong += 1;
     updated.streakWrong += 1;
     updated.streakFastCorrect = 0;
+    // Tally a recurring wrong value (confusion-pair signal). Ignore
+    // the correct answer (shouldn't happen on a wrong result) and any
+    // non-finite input. Capped at CONFUSION_MAX_KEYS distinct values.
+    if (
+      typeof typedWrong === "number" &&
+      Number.isFinite(typedWrong) &&
+      Math.abs(typedWrong - fact.answer) > 0.001
+    ) {
+      const key = String(typedWrong);
+      updated.wrongAnswers[key] = (updated.wrongAnswers[key] || 0) + 1;
+      pruneWrongAnswers(updated.wrongAnswers);
+    }
   }
   updated.state = determineState(updated, op, thr);
 
@@ -901,6 +925,95 @@ function subHint({ a, b, answer }) {
     strategy: `Count up from ${b}`,
     steps: [`${b} → ${a}`, `Distance: ${answer}`],
   };
+}
+
+// ---------- CONFUSION-PAIR COACH (2026-06-13) ----------
+// "Wrong" is a blunt signal. A student who answers 7×8 as 54 three
+// times isn't guessing — they're confusing it with 6×9. Capturing the
+// *value* they keep typing turns a generic miss into a diagnosable
+// confusion, and the fact whose answer is that value is the thing to
+// contrast against. The coach (a) shows a side-by-side contrast hint
+// the next time the confused fact is missed, and (b) interleaves the
+// partner fact so the student has to discriminate the two under time.
+export const CONFUSION_MIN_COUNT = 2;   // repeats of one wrong value → systematic
+export const CONFUSION_MAX_KEYS = 12;   // cap distinct wrong values stored per fact
+export const CONFUSION_PARTNER_RATE = 0.5; // chance the partner is shown next
+
+// Keep the wrongAnswers tally bounded: if it exceeds CONFUSION_MAX_KEYS
+// distinct values, drop the lowest-count entries (slips, not patterns).
+// Mutates in place — called right after an increment.
+export function pruneWrongAnswers(tally) {
+  const keys = Object.keys(tally);
+  if (keys.length <= CONFUSION_MAX_KEYS) return tally;
+  const sorted = keys.sort((a, b) => tally[b] - tally[a]);
+  for (const k of sorted.slice(CONFUSION_MAX_KEYS)) delete tally[k];
+  return tally;
+}
+
+// The dominant recurring wrong value for a fact, or null. Returns the
+// value with the highest count, provided it has recurred at least
+// CONFUSION_MIN_COUNT times.
+export function dominantWrongValue(fact) {
+  const tally = fact && fact.wrongAnswers;
+  if (!tally) return null;
+  let bestVal = null, bestCount = 0;
+  for (const [v, c] of Object.entries(tally)) {
+    if (c > bestCount) { bestCount = c; bestVal = v; }
+  }
+  if (bestCount < CONFUSION_MIN_COUNT) return null;
+  return { value: Number(bestVal), count: bestCount };
+}
+
+// Full confusion read for a fact: the dominant wrong value plus the
+// same-op fact whose answer equals it (the "confused-with" partner),
+// if one exists. Returns null when there's no systematic confusion.
+//   { value, count, partner }  — partner may be null (e.g. off-by-one
+//   errors where no fact has that answer).
+export function detectConfusion(fact, factsForOp) {
+  const dom = dominantWrongValue(fact);
+  if (!dom) return null;
+  let partner = null;
+  if (factsForOp) {
+    for (const f of Object.values(factsForOp)) {
+      if (f.id === fact.id) continue;
+      if (Math.abs(f.answer - dom.value) < 0.001) { partner = f; break; }
+    }
+  }
+  return { value: dom.value, count: dom.count, partner };
+}
+
+// Face of a fact for display, e.g. "7 × 8" or the numbers displayText.
+function factFace(fact, op) {
+  if (fact.displayText) return fact.displayText;
+  const sym = OPERATIONS[op]?.symbol || "?";
+  return `${fact.a} ${sym} ${fact.b}`;
+}
+
+// A contrast hint built from a detected confusion. Structured like
+// hintFor's output so the existing HintCard renders it unchanged.
+//   "56 is 7 × 8."  /  "54 is 6 × 9 — different fact."
+export function confusionHintFor(fact, confusion, op) {
+  const right = `${factFace(fact, op)} = ${fact.answer}`;
+  const steps = [`${right}`];
+  if (confusion.partner) {
+    steps.push(`You wrote ${confusion.value} — that's ${factFace(confusion.partner, op)}`);
+  } else {
+    steps.push(`You keep writing ${confusion.value} — the answer is ${fact.answer}`);
+  }
+  return {
+    strategy: "Don't mix these up",
+    steps,
+    instant: false,
+    confusion: true,
+  };
+}
+
+// Given a fact the student just got wrong, decide whether to surface
+// its confusion partner next (interleaving for discrimination). Returns
+// the partner fact id or null. Caller rolls the dice via the rate.
+export function confusionPartnerId(fact, factsForOp) {
+  const c = detectConfusion(fact, factsForOp);
+  return c && c.partner ? c.partner.id : null;
 }
 
 // ---------- FAST START PLACEMENT PROBE (2026-06-12) ----------

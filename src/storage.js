@@ -4,7 +4,17 @@
 //   { progress: { addition, subtraction, multiplication, division }, history: { [day]: { totalActiveSec, sessions[] } } }
 
 import { supabase } from "./supabase";
-import { determineState, LATENCY_CAP_MS, buildFacts, addDaysToKey } from "./engine";
+import {
+  determineState,
+  LATENCY_CAP_MS,
+  buildFacts,
+  addDaysToKey,
+  emptyCalibration,
+  thresholdsFor,
+  updateOpCalibration,
+  higherState,
+  CALIB_MIN_SAMPLES,
+} from "./engine";
 import { strandIdFor } from "./curriculum";
 
 const APP_SLUG = "math_facts";
@@ -76,6 +86,10 @@ export function defaultState() {
       multiplication: null,
       division: null,
     },
+    // Per-student latency calibration (2026-06-13). Empty until the
+    // student answers correctly a few times; thresholdsFor falls back
+    // to the global prior in the meantime.
+    calibration: emptyCalibration(),
     history: {},
   };
 }
@@ -135,14 +149,7 @@ export async function loadStudentState(studentId) {
     if (sessionsRes.error) throw sessionsRes.error;
 
     const progress = accountRes.data?.state?.progress || defaultState().progress;
-
-    // Migration pass — re-evaluate every existing fact's state with
-    // the current engine logic. Without this, students who built
-    // progress under old thresholds (or before the new `known`
-    // state was introduced) keep stale `state` values until they
-    // happen to answer each fact again. Also caps over-stored
-    // latencies (old data may include 22-min walk-aways).
-    refreshFactStates(progress);
+    let calibration = accountRes.data?.state?.calibration || emptyCalibration();
 
     const history = {};
     for (const s of sessionsRes.data || []) {
@@ -166,7 +173,24 @@ export async function loadStudentState(studentId) {
       });
     }
 
-    const state = { progress, history };
+    // Bootstrap calibration for students whose stored buffer is empty
+    // or sparse (i.e. everyone, until they practice after this ships).
+    // We don't keep raw per-attempt latencies in practice_sessions, but
+    // each session row carries its mean correct latency — seeding those
+    // session means gives an immediate, student-specific baseline that's
+    // far better than Isaac's global numbers. Means under-disperse the
+    // true distribution, so this is only a prior: thresholdsFor still
+    // shrinks it toward the global default by sample count and clamps.
+    calibration = seedCalibrationFromHistory(calibration, sessionsRes.data || []);
+
+    // Migration pass — re-evaluate every existing fact's state with the
+    // current engine logic AND the student's calibrated thresholds.
+    // Promote-only (see refreshFactStates) so a tightened personal bar
+    // never strips previously-earned mastery on reload. Also caps
+    // over-stored latencies (old data may include 22-min walk-aways).
+    refreshFactStates(progress, calibration);
+
+    const state = { progress, calibration, history };
     cacheLocally(studentId, state);
     return state;
   } catch (e) {
@@ -187,7 +211,30 @@ export async function loadStudentState(studentId) {
 //      Old persisted facts didn't have this field — without it the
 //      strand UI shows everything as "uncategorized" until each fact
 //      is touched again.
-function refreshFactStates(progress) {
+// Seed per-op calibration buffers from historical session means.
+// Only fills ops whose stored buffer is still below CALIB_MIN_SAMPLES,
+// so once a student has accumulated real per-attempt samples this is a
+// no-op and never overwrites the live buffer. Pure-ish: returns a new
+// calibration object. Sessions are processed oldest→newest (caller
+// orders them ascending) so the rolling buffer keeps the most recent.
+function seedCalibrationFromHistory(calibration, sessionRows) {
+  const calib = { ...(calibration || emptyCalibration()) };
+  const byOp = {};
+  for (const s of sessionRows) {
+    const op = s.context;
+    const lat = s.metrics?.avgLatencyMs;
+    if (!op || !lat || lat <= 0) continue;
+    (byOp[op] = byOp[op] || []).push(lat);
+  }
+  for (const op of Object.keys(byOp)) {
+    const existing = calib[op]?.samples?.length || 0;
+    if (existing >= CALIB_MIN_SAMPLES) continue; // real data already present
+    calib[op] = updateOpCalibration(calib[op], byOp[op]);
+  }
+  return calib;
+}
+
+function refreshFactStates(progress, calibration) {
   if (!progress) return;
   for (const op of Object.keys(progress)) {
     // If the student has never started this op, progress[op] is
@@ -203,6 +250,7 @@ function refreshFactStates(progress) {
       };
     }
     const facts = progress[op].facts;
+    const thr = thresholdsFor(calibration, op);
 
     // 0. Merge in any new facts that aren't in the persisted dict
     //    (e.g., the 2-digit pools introduced in Phase 2). Existing
@@ -227,7 +275,15 @@ function refreshFactStates(progress) {
         f.lastLatency = LATENCY_CAP_MS;
       }
       if (f.attempts > 0) {
-        f.state = determineState(f, op);
+        // Promote-only on reload: re-classify with the student's
+        // calibrated thresholds, but never drop below the persisted
+        // mastery rank. This lets a loosened bar upgrade a fact (e.g.
+        // a slow-typer's `known` fact finally reads as `automatic`)
+        // while a tightened bar can't retroactively strip mastery a
+        // student already earned — which would dent the reported
+        // automatic %. Live play (applyAttempt) still moves both ways.
+        const reclassified = determineState(f, op, thr);
+        f.state = higherState(f.state || "unknown", reclassified);
       }
       // Tag (or re-tag) the strand. Cheap — pure function over (op, a, b).
       f.strand = strandIdFor(op, f);
@@ -286,19 +342,30 @@ export function recordSession(studentId, state, sessionStats, factsAfter, levelA
     sessions: [...day.sessions, { ...sessionStats, when: Date.now() }],
   };
 
+  // Fold this session's correct-answer latencies into the student's
+  // calibration buffer for this op. These are real per-attempt samples
+  // (not session means), so they progressively replace any bootstrap
+  // seed and let the personal fast/slow line track the student.
+  const prevCalib = state.calibration || emptyCalibration();
+  const newCalibration = {
+    ...prevCalib,
+    [op]: updateOpCalibration(prevCalib[op], sessionStats.correctLatencies || []),
+  };
+
   const newState = {
     ...state,
     progress: {
       ...state.progress,
       [op]: { facts: factsAfter, currentLevel: levelAfter },
     },
+    calibration: newCalibration,
     history: { ...state.history, [dayKey]: updatedDay },
   };
 
   cacheLocally(studentId, newState);
 
   // Fire-and-forget server write. UI is already updated from the returned state.
-  saveSessionToSupabase(studentId, sessionStats, newState.progress).catch((e) => {
+  saveSessionToSupabase(studentId, sessionStats, newState.progress, newCalibration).catch((e) => {
     // eslint-disable-next-line no-console
     console.warn("Supabase save failed (cached locally; will retry on next load):", e);
   });
@@ -306,17 +373,17 @@ export function recordSession(studentId, state, sessionStats, factsAfter, levelA
   return newState;
 }
 
-async function saveSessionToSupabase(studentId, s, fullProgress) {
+async function saveSessionToSupabase(studentId, s, fullProgress, calibration) {
   const appId = await getAppId();
 
-  // 1. Upsert per-app persistent state (the math facts progress object).
+  // 1. Upsert per-app persistent state (progress + latency calibration).
   const accountWrite = supabase
     .from("student_app_accounts")
     .upsert(
       {
         student_id: studentId,
         app_id: appId,
-        state: { progress: fullProgress },
+        state: { progress: fullProgress, calibration },
       },
       { onConflict: "student_id,app_id" }
     );

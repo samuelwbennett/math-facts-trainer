@@ -56,16 +56,20 @@ export function dueQueueRate(dueCount) {
   return Math.min(0.5, 0.12 + dueCount * 0.03);
 }
 
-// Per-operation latency thresholds (ms).
-// Recalibrated 2026-05-18 from Isaac's real session data — old values
-// were physically unreachable for a 4th-grader typing answers on a
-// keyboard. Sample:
-//   addition p25 = 1179 ms (old fast was 1100 → 0 facts ever automatic)
-//   subtraction p25 = 1146 ms (old fast was 1100 → 0 facts ever automatic)
-//   multiplication p25 = 1520 ms (old fast was 1500 → just barely)
-// New `fast` lives at roughly the kid's p50 so a fluent fact CAN go
-// automatic. `slow` lives at roughly p75 so genuinely slow attempts
-// still get the "Correct, slow" coaching feedback.
+// Per-operation latency thresholds (ms) — GLOBAL PRIOR.
+// Originally calibrated 2026-05-18 from Isaac's real session data. As
+// of 2026-06-13 these are no longer the live thresholds: they're the
+// cold-start *prior* that per-student calibration shrinks away from as
+// each student accumulates their own latency history (see CALIBRATION
+// below). They still apply verbatim to a brand-new student who has no
+// samples yet, and they anchor the clamp band so a noisy early sample
+// can't produce an absurd personal threshold.
+//
+// The design intent is unchanged: `fast` sits at roughly the student's
+// p50 (a fluent fact CAN go automatic) and `slow` at roughly p75 (a
+// genuinely slow attempt still gets "Correct, slow" coaching). The
+// difference is that "the student's p50/p75" is now measured per
+// student instead of borrowed from one 4th-grader.
 export const THRESHOLDS = {
   addition:       { fast: 1500, slow: 2500 },
   subtraction:    { fast: 1500, slow: 2500 },
@@ -75,6 +79,102 @@ export const THRESHOLDS = {
   // require mental conversion. Generous thresholds.
   numbers:        { fast: 3000, slow: 5000 },
 };
+
+// ---------- PER-STUDENT LATENCY CALIBRATION (2026-06-13) ----------
+// A fixed fast/slow line mis-serves a 60-student cohort: a fast-typing
+// kid clears `fast` on facts they barely know (false "automatic"),
+// while a slow-handed kid who knows a fact cold can never beat the
+// clock and is stuck at `known` forever — never earning the automatic
+// credit or the "Automatic" feedback that motivates. Latency conflates
+// two things: how fast a student *recalls* and how fast they *type*.
+// Calibration removes the typing component by measuring each line
+// relative to that student's own correct-answer distribution.
+//
+// Model: keep a rolling buffer of each student's most recent CORRECT
+// answer latencies per operation. Personal fast = the buffer's p50,
+// personal slow = its p75 (the documented targets, now measured per
+// student). Until the buffer is large enough to trust, the personal
+// percentile is shrunk toward the global prior with an empirical-Bayes
+// weight w = n / (n + CALIB_PRIOR_STRENGTH): zero samples → 100% prior,
+// n = CALIB_PRIOR_STRENGTH → a 50/50 blend, large n → mostly personal.
+// The blend is then clamped to a band around the prior so a degenerate
+// sample (all walk-aways, or a burst of lucky-fast guesses) can't push
+// a kid's "fast" line to 300 ms or 7 s.
+//
+// The buffer is rolling, so the line tracks a student who genuinely
+// speeds up over weeks — their bar tightens, sustaining the challenge.
+// To stop that tightening from retroactively stripping earned mastery,
+// load-time re-classification is promote-only (see storage.js); live
+// play still moves states both ways on real performance.
+export const CALIB_BUFFER = 60;          // correct-latency samples kept per op
+export const CALIB_PRIOR_STRENGTH = 15;  // pseudo-count weight of the global prior
+export const CALIB_MIN_SAMPLES = 8;      // below this, thresholds == prior (too noisy)
+export const CALIB_CLAMP_LO = 0.5;       // personal threshold floor = prior * 0.5
+export const CALIB_CLAMP_HI = 1.8;       // personal threshold ceiling = prior * 1.8
+
+// Empty calibration for one op: an empty sample buffer.
+function emptyOpCalibration() {
+  return { samples: [], n: 0 };
+}
+
+// Empty calibration for every operation.
+export function emptyCalibration() {
+  const c = {};
+  for (const op of Object.keys(THRESHOLDS)) c[op] = emptyOpCalibration();
+  return c;
+}
+
+// Linear-interpolation percentile over an UNSORTED numeric array.
+// p in [0,1]. Returns null for an empty array.
+export function percentile(arr, p) {
+  if (!arr || arr.length === 0) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  if (s.length === 1) return s[0];
+  const idx = p * (s.length - 1);
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return s[lo];
+  return s[lo] + (s[hi] - s[lo]) * (idx - lo);
+}
+
+// Fold new correct-answer latencies into an op's calibration buffer.
+// Latencies are capped at LATENCY_CAP_MS first (a walk-away shouldn't
+// drag the percentile). Returns a NEW op-calibration object (pure).
+export function updateOpCalibration(opCalib, newLatencies) {
+  const base = opCalib && Array.isArray(opCalib.samples) ? opCalib.samples : [];
+  let samples = base.slice();
+  for (const lat of newLatencies || []) {
+    if (typeof lat !== "number" || !Number.isFinite(lat) || lat <= 0) continue;
+    samples.push(Math.min(lat, LATENCY_CAP_MS));
+  }
+  if (samples.length > CALIB_BUFFER) samples = samples.slice(samples.length - CALIB_BUFFER);
+  return { samples, n: samples.length };
+}
+
+// Resolve the live fast/slow thresholds for an op given a student's
+// calibration. Falls back to the global prior when calibration is
+// missing or too sparse to trust. Pure — safe to call every render.
+export function thresholdsFor(calibration, op) {
+  const prior = THRESHOLDS[op] || THRESHOLDS.addition;
+  const opCalib = calibration && calibration[op];
+  const n = opCalib?.samples?.length || 0;
+  if (n < CALIB_MIN_SAMPLES) return { ...prior, calibrated: false, n };
+
+  const w = n / (n + CALIB_PRIOR_STRENGTH);
+  const blendClamp = (personal, priorVal) => {
+    if (personal == null) return priorVal;
+    const blended = w * personal + (1 - w) * priorVal;
+    const lo = priorVal * CALIB_CLAMP_LO;
+    const hi = priorVal * CALIB_CLAMP_HI;
+    return Math.round(Math.min(Math.max(blended, lo), hi));
+  };
+
+  let fast = blendClamp(percentile(opCalib.samples, 0.5), prior.fast);
+  let slow = blendClamp(percentile(opCalib.samples, 0.75), prior.slow);
+  // Guarantee a non-degenerate ordering even after clamping.
+  if (slow <= fast) slow = fast + 200;
+  return { fast, slow, calibrated: true, n };
+}
 
 // Max latency we ever store on a fact. Beyond this the student has
 // clearly walked away (we saw a 22-minute pause on Isaac's data
@@ -302,12 +402,33 @@ export function initialProgress(op) {
 }
 
 // ---------- LOGIC ----------
-export function classify(correct, latency, op) {
-  const t = THRESHOLDS[op];
+// `thr` is the resolved per-student {fast, slow} for this op (from
+// thresholdsFor). Defaults to the global prior so legacy callers and
+// tests that omit it keep working.
+export function classify(correct, latency, op, thr = THRESHOLDS[op]) {
   if (!correct) return "wrong";
-  if (latency <= t.fast) return "fast";
-  if (latency <= t.slow) return "slow";
+  if (latency <= thr.fast) return "fast";
+  if (latency <= thr.slow) return "slow";
   return "tooSlow";
+}
+
+// Mastery rank of a state, low→high. Used by the load-time
+// promote-only guard so a calibration/threshold change can upgrade a
+// fact on reload but never retroactively strip earned mastery.
+const STATE_RANK = {
+  unknown: 0,
+  learning: 1,
+  effortful: 2,
+  accurate: 3,
+  known: 4,
+  automatic: 5,
+};
+export function stateRank(state) {
+  return STATE_RANK[state] ?? 0;
+}
+// Return whichever of two states carries the higher mastery rank.
+export function higherState(a, b) {
+  return stateRank(a) >= stateRank(b) ? a : b;
 }
 
 export function accuracyOf(fact) {
@@ -324,10 +445,10 @@ export function isQualifying(result, fact) {
   return result === "fast" || result === "slow" || result === "tooSlow";
 }
 
-export function determineState(fact, op) {
+export function determineState(fact, op, thr = THRESHOLDS[op]) {
   if (fact.attempts < 3) return "unknown";
   const acc = accuracyOf(fact);
-  const fastT = THRESHOLDS[op].fast;
+  const fastT = thr.fast;
   // Clean four-rung ladder: learning < effortful < known < automatic.
   // (`accurate` is kept in masteryScore for backward compat with
   // pre-2026-05-18 persisted data, but new evaluations never produce
@@ -386,7 +507,7 @@ function decayBoost(fact, today) {
   return 65;                     // long overdue — urgent
 }
 
-function priorityFor(fact, op, today) {
+function priorityFor(fact, op, today, thr = THRESHOLDS[op]) {
   let p = 0;
   if (fact.state === "learning")  p += 50;
   else if (fact.state === "effortful") p += 40;
@@ -399,7 +520,7 @@ function priorityFor(fact, op, today) {
   else if (fact.state === "automatic") p += 8;
 
   if (fact.streakWrong > 0) p += 25;
-  if (fact.lastLatency && fact.lastLatency > THRESHOLDS[op].slow) p += 15;
+  if (fact.lastLatency && fact.lastLatency > thr.slow) p += 15;
   p += recencyBoost(fact.lastSeenAt);
   p += decayBoost(fact, today);
   return p;
@@ -472,8 +593,8 @@ export function activeStrandId(facts, op) {
 // ============================================================
 
 // Weighted pick among the 5 highest-priority facts in a pool.
-function weightedPick(pool, op, today) {
-  const scored = pool.map((f) => ({ fact: f, p: priorityFor(f, op, today) }));
+function weightedPick(pool, op, today, thr = THRESHOLDS[op]) {
+  const scored = pool.map((f) => ({ fact: f, p: priorityFor(f, op, today, thr) }));
   scored.sort((a, b) => b.p - a.p);
   const top = scored.slice(0, 5);
   const totalP = top.reduce((s, x) => s + Math.max(x.p, 1), 0);
@@ -504,13 +625,15 @@ export function dueFacts(facts, today = todayKey()) {
 //
 // `op` is required; `currentLevel` no longer used and accepted as
 // undefined for backward compat from any caller still passing it.
-export function selectNextFact(facts, lastId, op) {
+// `thr` is the student's resolved thresholds (for the slow-latency
+// priority boost); defaults to the global prior.
+export function selectNextFact(facts, lastId, op, thr = THRESHOLDS[op]) {
   const today = todayKey();
 
   // SRS due-queue first.
   const due = dueFacts(facts, today).filter((f) => f.id !== lastId);
   if (due.length > 0 && Math.random() < dueQueueRate(due.length)) {
-    return weightedPick(due, op, today);
+    return weightedPick(due, op, today, thr);
   }
 
   const statuses = strandStatuses(facts, op);
@@ -530,10 +653,10 @@ export function selectNextFact(facts, lastId, op) {
     return Object.values(facts).filter((f) => f.id !== lastId)[0]
         || Object.values(facts)[0];
   }
-  return weightedPick(pool, op, today);
+  return weightedPick(pool, op, today, thr);
 }
 
-export function applyAttempt(fact, result, latency, op) {
+export function applyAttempt(fact, result, latency, op, thr = THRESHOLDS[op]) {
   // Cap stored latency so a walk-away doesn't poison the EMA forever.
   const cappedLat = Math.min(latency, LATENCY_CAP_MS);
   const updated = { ...fact };
@@ -554,7 +677,7 @@ export function applyAttempt(fact, result, latency, op) {
     updated.streakWrong += 1;
     updated.streakFastCorrect = 0;
   }
-  updated.state = determineState(updated, op);
+  updated.state = determineState(updated, op, thr);
 
   // ---- SRS scheduling ----
   const today = todayKey();

@@ -423,6 +423,8 @@ function FastStartChoice({ op, onProbe, onScratch, onBack }) {
 function ProbeSession({ op, persisted, onComplete }) {
   const operation = engine.OPERATIONS[op];
   const startProg = persisted.progress[op] || engine.initialProgress(op);
+  const thrRef = useRef(engine.thresholdsFor(persisted.calibration, op));
+  const thr = thrRef.current;
 
   const planRef = useRef(null);
   if (!planRef.current) planRef.current = engine.buildProbePlan(startProg.facts, op);
@@ -491,6 +493,7 @@ function ProbeSession({ op, persisted, onComplete }) {
         xp: engine.xpFromActiveSec(s.activeSec),
         newlyAutomaticIds: [],
         newlyAutomaticCount: 0,
+        correctLatencies: s.latencies,
         probe: true,
         passedStrandCount: s.passed.length,
         placedStrandLabel: placedDef?.label || null,
@@ -508,7 +511,7 @@ function ProbeSession({ op, persisted, onComplete }) {
     const numInput = Number(input);
     const correctAns =
       Number.isFinite(numInput) && Math.abs(numInput - fact.answer) < 0.001;
-    const withinSlow = latency <= engine.THRESHOLDS[op].slow;
+    const withinSlow = latency <= thr.slow;
     const pass = correctAns && withinSlow;
 
     const s = statsRef.current;
@@ -516,7 +519,7 @@ function ProbeSession({ op, persisted, onComplete }) {
     if (correctAns) {
       s.correct += 1;
       s.latencies.push(latency);
-      if (latency <= engine.THRESHOLDS[op].fast) s.fastCount += 1;
+      if (latency <= thr.fast) s.fastCount += 1;
     }
     s.activeSec += Math.min(latency / 1000, engine.PROBLEM_TIME_CAP);
     setInput("");
@@ -592,10 +595,16 @@ function Session({ op, persisted, onComplete }) {
   const operation = engine.OPERATIONS[op];
   const startProg = persisted.progress[op] || engine.initialProgress(op);
 
+  // Resolve this student's personalized fast/slow line for the op once
+  // per session (calibration is fixed for the lifetime of a session).
+  // Falls back to the global prior when the student isn't calibrated yet.
+  const thrRef = useRef(engine.thresholdsFor(persisted.calibration, op));
+  const thr = thrRef.current;
+
   const [facts, setFacts] = useState(startProg.facts);
   const [currentLevel, setCurrentLevel] = useState(startProg.currentLevel);
   const [currentId, setCurrentId] = useState(() =>
-    engine.selectNextFact(startProg.facts, null, op).id
+    engine.selectNextFact(startProg.facts, null, op, thrRef.current).id
   );
   // Phase 4 — missing-operand presentation rotation. A fact in `known`
   // or `automatic` state has a 1-in-3 chance of being presented as
@@ -712,6 +721,8 @@ function Session({ op, persisted, onComplete }) {
       xp: engine.xpFromActiveSec(f.activeSec),
       newlyAutomaticIds,
       newlyAutomaticCount: newlyAutomaticIds.length,
+      // Raw correct-answer latencies feed per-student calibration.
+      correctLatencies: f.latencies,
     };
     onComplete(summary, latestFacts, latestLevel);
   }
@@ -735,13 +746,13 @@ function Session({ op, persisted, onComplete }) {
     const numInput = Number(input);
     const correctAns =
       Number.isFinite(numInput) && Math.abs(numInput - expected) < 0.001;
-    const result = engine.classify(correctAns, latency, op);
+    const result = engine.classify(correctAns, latency, op, thr);
 
     // Active-time accumulation, capped per problem to prevent idle gaming
     const activeAdd = Math.min(latency / 1000, engine.PROBLEM_TIME_CAP);
     const newActive = activeSec + activeAdd;
 
-    const updated = engine.applyAttempt(fact, result, latency, op);
+    const updated = engine.applyAttempt(fact, result, latency, op, thr);
     const newFacts = { ...facts, [updated.id]: updated };
 
     const newAttempts = attempts + 1;
@@ -831,7 +842,7 @@ function Session({ op, persisted, onComplete }) {
       return;
     }
 
-    const next = engine.selectNextFact(newFacts, updated.id, op);
+    const next = engine.selectNextFact(newFacts, updated.id, op, thr);
     setCurrentId(next.id);
     setCurrentPresentation(pickPresentation(newFacts[next.id]));
     setInput("");

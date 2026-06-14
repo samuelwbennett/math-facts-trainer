@@ -14,10 +14,12 @@
 // the cron infrastructure being the only caller. We add a header
 // check (CRON_SECRET) for defense in depth.
 //
-// What gets written per student per day:
-//   - Today + yesterday (covers the case where the cron runs after
-//     midnight Denver but before midnight UTC, or where a kid did
-//     a late-night session that crossed the date boundary)
+// What gets written per student:
+//   - A rolling window of the last BACKFILL_DAYS days (default 7).
+//     Re-syncing several trailing days makes the job self-healing: a
+//     missed run (or a multi-day outage) is recovered next time, so an
+//     MA-active weekday can't silently lose its attendance credit. A
+//     manual run may pass ?days=N for a one-time deeper backfill.
 //
 // Idempotent: SET pattern on per_app.math_academy, recomputes
 // total_xp from per_app sum. Safe to re-run as often as needed.
@@ -27,6 +29,16 @@ import { createClient } from "@supabase/supabase-js";
 
 const MA_BASE_URL = "https://mathacademy.com/api/beta5";
 const APP_SLUG = "math_academy";
+
+// How many trailing days each run re-syncs. Was effectively 2 (today +
+// yesterday), which permanently dropped attendance credit whenever the
+// cron missed more than one day — MA-active weekdays then never landed
+// in daily_progress, so the attendance economy under-paid MA students.
+// A rolling window makes the sync self-healing: any outage shorter than
+// the window is recovered on the next successful run. Override per-run
+// with ?days=N (capped) for a one-time deeper backfill.
+const BACKFILL_DAYS = Number(process.env.MA_SYNC_BACKFILL_DAYS) || 7;
+const MAX_BACKFILL_DAYS = 60; // safety cap for the ?days= override
 
 function denverDateISO(daysAgo = 0) {
   const today = new Intl.DateTimeFormat("en-CA", {
@@ -162,18 +174,30 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, synced: 0, students: 0 });
     }
 
-    // 3. For each student, sync today + yesterday. Serialize to be
-    //    gentle on the partner API (no rate limit info published).
-    const today = denverDateISO(0);
-    const yesterday = denverDateISO(1);
+    // 3. For each student, sync a rolling window of the last N days.
+    //    Serialize across students (gentle on the partner API — no
+    //    published rate limit); fan out the window's days in parallel
+    //    per student. N defaults to BACKFILL_DAYS; a manual run can
+    //    pass ?days=N for a one-time deeper backfill (e.g. since program
+    //    start), capped at MAX_BACKFILL_DAYS.
+    const requestedDays = Number(req.query?.days);
+    const windowDays = Math.min(
+      MAX_BACKFILL_DAYS,
+      Number.isFinite(requestedDays) && requestedDays > 0
+        ? requestedDays
+        : BACKFILL_DAYS,
+    );
+    const days = Array.from({ length: windowDays }, (_, i) => denverDateISO(i));
+
     const results = [];
     for (const link of allLinks) {
       try {
-        const [a, b] = await Promise.all([
-          syncStudentDay(supabase, link.student_id, today, link.external_id),
-          syncStudentDay(supabase, link.student_id, yesterday, link.external_id),
-        ]);
-        results.push(a, b);
+        const dayResults = await Promise.all(
+          days.map((day) =>
+            syncStudentDay(supabase, link.student_id, day, link.external_id),
+          ),
+        );
+        results.push(...dayResults);
       } catch (err) {
         results.push({
           studentId: link.student_id,

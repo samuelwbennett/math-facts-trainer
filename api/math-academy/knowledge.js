@@ -163,11 +163,14 @@ export default async function handler(req, res) {
       summary: summarize(topics),
     });
   } catch (err) {
-    // Full diagnostics server-side only.
+    // Full diagnostics server-side; ?debug=1 echoes them for
+    // integration troubleshooting (route names + upstream status
+    // only — no credentials ever appear in err.message).
     console.error("[math-academy/knowledge]", err.message);
     return res.status(err.code === "UNCONFIGURED" ? 503 : 502).json({
       error: "KNOWLEDGE_PROFILE_UNAVAILABLE",
       retryable: err.code !== "UNCONFIGURED",
+      ...(req.query.debug === "1" ? { details: err.message } : {}),
     });
   }
 }

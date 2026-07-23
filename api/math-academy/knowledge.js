@@ -13,8 +13,10 @@
 //        topics:  [{
 //          id, name,
 //          unitId, unitName,            // may be null
-//          mastery,                     // 0..100 integer | null
+//          moduleId, moduleName,        // may be null
+//          mastery,                     // 0..100 integer | null (from completion)
 //          masteryRaw,                  // provider value, untouched
+//          stability,                   // 0..100 | null — long-term retention
 //          state,                       // mastered|learning|review|not_started|unknown
 //          providerState,               // provider's raw state string | null
 //          lastPracticedAt,             // ISO string | null
@@ -23,17 +25,21 @@
 //        summary: { mastered, learning, review, notStarted, unknown, total }
 //      }
 //
-// Route resolution (in order):
-//   1. MA_KNOWLEDGE_ROUTE env — the confirmed Beta 9 path, e.g.
-//        MA_KNOWLEDGE_ROUTE=/students/{id}/knowledge
-//        MA_KNOWLEDGE_METHOD=GET            (or POST; body {studentId})
-//      Set these once Math Academy confirms the contract.
-//   2. If unset AND MA_KNOWLEDGE_DISCOVERY=true — probe candidate
-//      routes (GET spellings + RPC-style POST), cache the winner for
-//      the lambda's lifetime. Off by default: auto-discovery in
-//      steady-state risks silently adopting a semantically different
-//      future route (e.g. a beta10 /knowledge that means something else).
-//   3. Neither → 503 KNOWLEDGE_PROFILE_UNAVAILABLE.
+// Beta 9 contract (per MA's API doc, shared 2026-07-23):
+//
+//   GET {beta9}/students/:studentIdentifier/courses/:courseId/knowledge
+//   Auth: Public-API-Key header only (GETs need no HMAC signature).
+//   Response: course → units → modules → topics, each carrying a
+//   completion metric on a 0..1 scale plus a "stability" property
+//   ("how stable the knowledge is in terms of long-term retention"),
+//   aggregating upward through the hierarchy.
+//
+// The courseId comes from the student's currentCourse (Beta 5
+// /students/{id}, same as mastery.js). No current course → empty
+// topics with _noCourse, mirroring mastery.js.
+//
+// MA_KNOWLEDGE_ROUTE env still overrides the documented path
+// ({id} and {courseId} placeholders) as an escape hatch.
 //
 // Browser responses on failure are generic (no route topology);
 // full attempt diagnostics go to Vercel logs via console.error.
@@ -111,33 +117,48 @@ export default async function handler(req, res) {
 
     const maId = String(link.external_id);
 
-    const [studentResp, knowledgeResp] = await Promise.all([
-      maRequest(MA_BASE_URL_BETA5, `/students/${encodeURIComponent(maId)}`).catch(
-        () => null
-      ),
-      fetchKnowledge(maId),
-    ]);
-
+    // Step 1: current course (Beta 5 student endpoint, known-good) —
+    // the documented knowledge route requires a courseId.
+    const studentResp = await maRequest(
+      MA_BASE_URL_BETA5,
+      `/students/${encodeURIComponent(maId)}`
+    );
     const courseRaw = studentResp?.student?.currentCourse || null;
-    const course = courseRaw
-      ? {
-          id: String(courseRaw.id ?? ""),
-          name: courseRaw.name || "Current Course",
-          percentComplete: Math.round((Number(courseRaw.progress) || 0) * 100),
-        }
-      : null;
+    if (!courseRaw?.id) {
+      return res.status(200).json({
+        studentId,
+        asOf: null,
+        course: null,
+        topics: [],
+        summary: emptySummary(),
+        _noCourse: true,
+      });
+    }
+    const course = {
+      id: String(courseRaw.id),
+      name: courseRaw.name || "Current Course",
+      percentComplete: Math.round((Number(courseRaw.progress) || 0) * 100),
+    };
+
+    // Step 2: the knowledge profile itself.
+    const knowledgeResp = await fetchKnowledge(maId, course.id);
 
     const raw =
       knowledgeResp?.knowledge ??
+      knowledgeResp?.course ??
       knowledgeResp?.student?.knowledge ??
       knowledgeResp;
-    const rawTopics = Array.isArray(raw) ? raw : raw?.topics || raw?.items || [];
-    const topics = rawTopics.map(normalizeTopic);
+    const topics = flattenHierarchy(raw).map(normalizeTopic);
 
     return res.status(200).json({
       studentId,
       asOf: raw?.asOf || raw?.timestamp || new Date().toISOString(),
-      course,
+      course: {
+        ...course,
+        // Prefer the knowledge payload's own aggregates when present.
+        percentComplete: toPct(raw?.completion) ?? course.percentComplete,
+        stability: toPct(raw?.stability),
+      },
       topics,
       summary: summarize(topics),
     });
@@ -151,88 +172,61 @@ export default async function handler(req, res) {
   }
 }
 
-// ---- Route resolution ----
+// ---- Documented route (env-overridable) ----
 
-// RPC-style POST is a real possibility: the announcement says "the
-// getStudentKnowledge endpoint", and an Express "Cannot GET /x" only
-// proves there's no GET handler — a POST route may still exist.
-const GET_CANDIDATES = [
-  (id) => `/students/${id}/knowledge`,
-  (id) => `/students/${id}/knowledge-profile`,
-  (id) => `/students/${id}/knowledgeProfile`,
-  (id) => `/getStudentKnowledge?studentId=${id}`,
-];
-const POST_CANDIDATES = [
-  () => `/getStudentKnowledge`,
-  () => `/students/getStudentKnowledge`,
-];
+const DEFAULT_ROUTE = "/students/{id}/courses/{courseId}/knowledge";
 
-let cachedRoute = null; // { method, build } for this lambda's lifetime
+async function fetchKnowledge(maId, courseId) {
+  const template = process.env.MA_KNOWLEDGE_ROUTE || DEFAULT_ROUTE;
+  const path = template
+    .replace("{id}", encodeURIComponent(maId))
+    .replace("{courseId}", encodeURIComponent(courseId));
+  const method = (process.env.MA_KNOWLEDGE_METHOD || "GET").toUpperCase();
+  return maRequest(MA_BASE_URL_BETA9, path, {
+    method,
+    ...(method === "POST" ? { body: { studentId: maId, courseId } } : {}),
+  });
+}
 
-async function fetchKnowledge(maId) {
-  const id = encodeURIComponent(maId);
+// ---- Hierarchy flattening ----
+// Documented shape: course → units → modules → topics, completion
+// 0..1 at every level plus "stability". Flattened defensively so a
+// missing level (topics directly on units, or a flat topics array)
+// still works. Each topic row carries its unit for dashboard
+// grouping and its module for finer context.
+function flattenHierarchy(raw) {
+  if (!raw || typeof raw !== "object") return [];
 
-  // 1. Explicitly configured route wins, always.
-  const configured = process.env.MA_KNOWLEDGE_ROUTE;
-  if (configured) {
-    const method = (process.env.MA_KNOWLEDGE_METHOD || "GET").toUpperCase();
-    const path = configured.replace("{id}", id);
-    return maRequest(MA_BASE_URL_BETA9, path, {
-      method,
-      ...(method === "POST" ? { body: { studentId: maId } } : {}),
-    });
-  }
+  // Flat shapes first (topics/items directly on the payload).
+  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw.topics)) return raw.topics;
+  if (Array.isArray(raw.items)) return raw.items;
 
-  // 2. Discovery only when explicitly enabled.
-  if (process.env.MA_KNOWLEDGE_DISCOVERY !== "true") {
-    const err = new Error(
-      "MA_KNOWLEDGE_ROUTE not set and MA_KNOWLEDGE_DISCOVERY!=true — set the confirmed Beta 9 route to enable this endpoint"
-    );
-    err.code = "UNCONFIGURED";
-    throw err;
-  }
-
-  if (cachedRoute) {
-    return maRequest(MA_BASE_URL_BETA9, cachedRoute.build(id), {
-      method: cachedRoute.method,
-      ...(cachedRoute.method === "POST" ? { body: { studentId: maId } } : {}),
-    });
-  }
-
-  const attempts = [];
-  for (const build of GET_CANDIDATES) {
-    try {
-      const data = await maRequest(MA_BASE_URL_BETA9, build(id));
-      cachedRoute = { method: "GET", build };
-      return data;
-    } catch (err) {
-      attempts.push(`GET ${build(id)} [${err.status || "ERR"}]`);
+  const units = Array.isArray(raw.units) ? raw.units : [];
+  const out = [];
+  for (const unit of units) {
+    const unitCtx = {
+      unitId: unit?.id != null ? String(unit.id) : null,
+      unitName: unit?.name ?? unit?.unitName ?? null,
+    };
+    const modules = Array.isArray(unit?.modules) ? unit.modules : [];
+    for (const mod of modules) {
+      const topics = Array.isArray(mod?.topics) ? mod.topics : [];
+      for (const t of topics) {
+        out.push({
+          ...t,
+          ...unitCtx,
+          moduleId: mod?.id != null ? String(mod.id) : null,
+          moduleName: mod?.name ?? null,
+        });
+      }
+    }
+    // Topics directly on the unit (no module level).
+    if (Array.isArray(unit?.topics)) {
+      for (const t of unit.topics) out.push({ ...t, ...unitCtx });
     }
   }
-  for (const build of POST_CANDIDATES) {
-    try {
-      const data = await maRequest(MA_BASE_URL_BETA9, build(id), {
-        method: "POST",
-        body: { studentId: maId },
-      });
-      cachedRoute = { method: "POST", build };
-      return data;
-    } catch (err) {
-      attempts.push(`POST ${build(id)} [${err.status || "ERR"}]`);
-    }
-  }
-
-  // Version-liveness check enriches the server-side log only.
-  let versionCheck;
-  try {
-    await maRequest(MA_BASE_URL_BETA9, `/students/${id}`);
-    versionCheck = "beta9 /students/{id} OK — route name wrong";
-  } catch (err) {
-    versionCheck = `beta9 /students/{id} → ${err.status || "ERR"}`;
-  }
-  throw new Error(
-    `Beta 9 knowledge route not found. ${versionCheck}. Tried: ${attempts.join(", ")}`
-  );
+  return out;
 }
 
 // ---- Normalization ----
@@ -245,15 +239,19 @@ async function fetchKnowledge(maId) {
 const KNOWN_STATES = ["mastered", "learning", "review", "not_started"];
 const RECOGNIZED_KEYS = new Set([
   "id", "topicId", "name", "topicName", "topic",
-  "unit", "unitName", "unitId", "module",
+  "unit", "unitName", "unitId", "module", "moduleId", "moduleName",
+  "completion", "stability",
   "mastery", "knowledgeLevel", "score", "progress", "strength", "proficiency",
   "state", "status",
   "lastPracticedAt", "lastActivityAt", "lastSeen",
 ]);
 
 function normalizeTopic(t) {
+  // Beta 9 documents `completion` (0..1); older guesses kept as
+  // fallbacks so the adapter tolerates drift.
   const rawMastery =
-    t.mastery ?? t.knowledgeLevel ?? t.score ?? t.progress ?? t.strength ?? null;
+    t.completion ?? t.mastery ?? t.knowledgeLevel ?? t.score ?? t.progress ??
+    t.strength ?? null;
   const mastery = toPct(rawMastery);
   const providerState = t.state ?? t.status ?? null;
 
@@ -266,9 +264,13 @@ function normalizeTopic(t) {
     id: String(t.id ?? t.topicId ?? ""),
     name: String(t.name ?? t.topicName ?? t.topic ?? ""),
     unitId: t.unitId != null ? String(t.unitId) : null,
-    unitName: t.unitName ?? t.unit ?? t.module ?? null,
+    unitName: t.unitName ?? t.unit ?? null,
+    moduleId: t.moduleId ?? null,
+    moduleName: t.moduleName ?? t.module ?? null,
     mastery,
     masteryRaw: rawMastery,
+    // Long-term retention strength, 0..100 (documented "stability").
+    stability: toPct(t.stability),
     state: deriveState(providerState, mastery),
     providerState: providerState != null ? String(providerState) : null,
     lastPracticedAt: t.lastPracticedAt ?? t.lastActivityAt ?? t.lastSeen ?? null,

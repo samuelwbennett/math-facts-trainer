@@ -181,7 +181,21 @@ async function fetchKnowledgeProbing(maId) {
       // status lands in the attempt log either way.
     }
   }
-  throw new Error(`Beta 9 knowledge route not found. Tried: ${attempts.join(", ")}`);
+  // Distinguish "wrong route name" from "beta9 not live at all":
+  // /students/{id} works on beta5, so its beta9 status tells us
+  // whether the version exists on this host.
+  let versionCheck = "unknown";
+  try {
+    await maGet(MA_BASE_URL_BETA9, `/students/${maId}`);
+    versionCheck = "beta9 alive (/students/{id} OK) — knowledge route name is wrong";
+  } catch (err) {
+    versionCheck = `beta9 /students/{id} → ${err.status || "ERR"}${
+      err.status === 404 ? " — beta9 may not be live on this host yet" : ""
+    }`;
+  }
+  throw new Error(
+    `Beta 9 knowledge route not found. ${versionCheck}. Tried: ${attempts.join(", ")}`
+  );
 }
 
 function normalizeTopic(t) {

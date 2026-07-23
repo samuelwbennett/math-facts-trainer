@@ -25,11 +25,12 @@
 // still rolling out, unexpected shape): 502 with details, so the
 // dashboard adapter degrades honestly instead of showing zeros.
 //
-// NOTE on the Beta 9 path: following the partner API's REST
-// conventions (/students/{id}, /students/{id}/activity), we call
-//   GET https://mathacademy.com/api/beta9/students/{id}/knowledge
-// If MA's docs name the route differently, this constant is the
-// only thing to change.
+// NOTE on the Beta 9 path: MA's partner docs aren't public and
+// /students/{id}/knowledge returned 404, so this handler PROBES a
+// list of candidate routes (REST + operation-name conventions) on
+// first use, locks onto whichever answers, and caches it for the
+// lifetime of the lambda. On total failure the 502 details include
+// every attempt's status so the next fix is one constant.
 //
 // CORS *: same as snapshot.
 // ============================================================
@@ -105,7 +106,7 @@ export default async function handler(req, res) {
     // course context is nice-to-have, knowledge is the payload.
     const [studentResp, knowledgeResp] = await Promise.all([
       maGet(MA_BASE_URL_BETA5, `/students/${maId}`).catch(() => null),
-      maGet(MA_BASE_URL_BETA9, `/students/${maId}/knowledge`),
+      fetchKnowledgeProbing(maId),
     ]);
 
     const courseRaw = studentResp?.student?.currentCourse || null;
@@ -142,6 +143,45 @@ export default async function handler(req, res) {
       details: err.message,
     });
   }
+}
+
+// ---- Beta 9 route discovery ----
+// Ordered by likelihood: REST-style resources first (matches
+// /students/{id}/activity), then RPC-style operation names.
+const CANDIDATE_PATHS = [
+  (id) => `/students/${id}/knowledge`,
+  (id) => `/students/${id}/knowledge-profile`,
+  (id) => `/students/${id}/knowledgeProfile`,
+  (id) => `/students/${id}/knowledge-graph`,
+  (id) => `/students/${id}/topics`,
+  (id) => `/getStudentKnowledge?studentId=${id}`,
+  (id) => `/getStudentKnowledge?student=${id}`,
+  (id) => `/students/${id}/getStudentKnowledge`,
+  (id) => `/knowledge?studentId=${id}`,
+];
+
+// Module-level cache: warm lambdas skip re-probing.
+let knownGoodPath = null;
+
+async function fetchKnowledgeProbing(maId) {
+  if (knownGoodPath) {
+    return maGet(MA_BASE_URL_BETA9, knownGoodPath(maId));
+  }
+  const attempts = [];
+  for (const build of CANDIDATE_PATHS) {
+    const path = build(maId);
+    try {
+      const data = await maGet(MA_BASE_URL_BETA9, path);
+      knownGoodPath = build;
+      return data;
+    } catch (err) {
+      attempts.push(`${path} [${err.status || "ERR"}]`);
+      // 404 → route doesn't exist, keep probing. Anything else
+      // (401/403/400/5xx) is still worth continuing past, but the
+      // status lands in the attempt log either way.
+    }
+  }
+  throw new Error(`Beta 9 knowledge route not found. Tried: ${attempts.join(", ")}`);
 }
 
 function normalizeTopic(t) {
